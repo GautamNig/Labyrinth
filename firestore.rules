@@ -1,0 +1,45 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Rooms collection
+    match /rooms/{roomId} {
+      // Anyone can read active rooms
+      allow read: if request.auth != null && 
+                   resource.data.isActive == true;
+      
+      // Authenticated users can create rooms
+      allow create: if request.auth != null;
+      
+      // Only room host can update their room
+      allow update: if request.auth != null && 
+                    request.auth.uid == resource.data.hostId;
+      
+      // Only room host can delete their room
+      allow delete: if request.auth != null && 
+                    request.auth.uid == resource.data.hostId;
+      
+      // Participants subcollection
+      match /participants/{userId} {
+        // Anyone can read participants in active rooms
+        allow read: if request.auth != null && 
+                     get(/databases/$(database)/documents/rooms/$(roomId)).data.isActive == true;
+        
+        // Authenticated users can join (create) if room has space
+        allow create: if request.auth != null && 
+                      request.auth.uid == userId &&
+                      request.auth.uid != get(/databases/$(database)/documents/rooms/$(roomId)).data.hostId &&
+                      get(/databases/$(database)/documents/rooms/$(roomId)).data.currentParticipants < 
+                      get(/databases/$(database)/documents/rooms/$(roomId)).data.maxParticipants;
+        
+        // Users can update their own participant status
+        allow update: if request.auth != null && 
+                      request.auth.uid == userId;
+        
+        // Users can leave (delete themselves) or host can kick
+        allow delete: if request.auth != null && 
+                      (request.auth.uid == userId || 
+                       request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.hostId);
+      }
+    }
+  }
+}
