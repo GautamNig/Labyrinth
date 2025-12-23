@@ -1,0 +1,47 @@
+[
+  {
+    "id": "1iEB8JE9gA328lqNQCjv",
+    "name": "Dfgg",
+    "maxParticipants": 2,
+    "hostId": "GuUKvuO8E0goWwF89MK46MLiImt1",
+    "hostName": "Gautam Nigam",
+    "hostPhotoURL": "https://lh3.googleusercontent.com/a/ACg8ocLVvRgF1CCjxTTdUBKEe6YCLqk9_CQnjNnVml-K3NyYe4onHeU=s96-c",
+    "isActive": true,
+    "status": "waiting",
+    "roomCode": "198038",
+    "createdAt": "2025-12-23T14:04:43.700Z",
+    "currentParticipants": 2,
+    "lastActivity": "2025-12-23T14:05:01.687Z",
+    "participants": [
+      {
+        "id": "GuUKvuO8E0goWwF89MK46MLiImt1",
+        "name": "Gautam Nigam",
+        "email": "nigam.gautam@gmail.com",
+        "photoURL": "https://lh3.googleusercontent.com/a/ACg8ocLVvRgF1CCjxTTdUBKEe6YCLqk9_CQnjNnVml-K3NyYe4onHeU=s96-c",
+        "isHost": true,
+        "isActive": true,
+        "joinedAt": "2025-12-23T14:04:44.105Z"
+      },
+      {
+        "id": "iMKGFzfEF1esEzNogBHreM89MzH2",
+        "name": "Chad Green",
+        "isActive": true,
+        "email": "greenychad@gmail.com",
+        "photoURL": "https://lh3.googleusercontent.com/a/ACg8ocK1KVuHygCRW8JvwxPk-ya4c5-q2vRjgRw0E8SRvuWH-5bc9A=s96-c",
+        "isHost": false,
+        "joinedAt": "2025-12-23T14:05:01.687Z"
+      }
+    ],
+    "signaling": [
+      {
+        "id": "GuUKvuO8E0goWwF89MK46MLiImt1",
+        "lastSeen": "2025-12-23T14:04:44.553Z",
+        "readyForConnection": true,
+        "isOnline": true,
+        "userName": "Gautam Nigam",
+        "userId": "GuUKvuO8E0goWwF89MK46MLiImt1",
+        "status": "online"
+      }
+    ]
+  }
+]

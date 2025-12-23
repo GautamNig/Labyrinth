@@ -1,57 +1,372 @@
-import React, { useEffect, useState } from 'react';
+// pages/RoomPage.jsx - COMPLETE UPDATED VERSION
+import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { 
+import { usePeer } from '../contexts/PeerContext';
+import ConnectionDebug from '../components/ConnectionDebug';
+import RemoteVideo from '../components/RemoteVideo';
+
+import {
   getRoom,
   getRoomParticipants,
   joinRoom as joinRoomService,
   listenToRoom,
-  listenToParticipants
+  listenToParticipants,
+  debugRoomState
 } from '../services/roomService';
+import { useMedia } from '../contexts/MediaContext';
+import { useRoom } from '../contexts/RoomContext';
+import LocalVideoPreview from '../components/LocalVideoPreview';
+import { collection, getDocs, doc, getDoc } from 'firebase/firestore';
+import { db } from '../firebase';
 
 const RoomPage = () => {
   const { roomId } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
-  
+  const { setCurrentRoom } = useRoom();
+
   const [room, setRoom] = useState(null);
   const [participants, setParticipants] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [hasLoaded, setHasLoaded] = useState(false);
+  const [joinAttempted, setJoinAttempted] = useState(false);
+  const { peers, connectionStatus, activeConnections, initializeUserSignaling, connectToUser } = usePeer();
+  const {
+    localStream,
+    isCameraOn,
+    isMicOn,
+    toggleCamera,
+    toggleMicrophone,
+    isLoading: mediaLoading,
+    error: mediaError
+  } = useMedia();
 
-    useEffect(() => {
-    setHasLoaded(false);
-  }, [roomId]);
+  // Debug function to check Firestore structure
+  const debugFirestoreStructure = async () => {
+    console.clear();
+    console.log('🔍 === COMPLETE FIRESTORE DEBUG === 🔍');
+    console.log('Timestamp:', new Date().toISOString());
+    console.log('Current user:', user?.uid);
+    console.log('Room ID:', roomId);
+    
+    try {
+      // 1. Get the specific room
+      console.log('\n📁 === CURRENT ROOM DATA ===');
+      const roomRef = doc(db, 'rooms', roomId);
+      const roomSnap = await getDoc(roomRef);
+      
+      if (!roomSnap.exists()) {
+        console.log('❌ Room not found in Firestore');
+        return;
+      }
+      
+      const roomData = roomSnap.data();
+      console.log('📋 Room Document:', {
+        id: roomId,
+        name: roomData.name,
+        hostId: roomData.hostId,
+        hostName: roomData.hostName,
+        roomCode: roomData.roomCode,
+        currentParticipants: roomData.currentParticipants,
+        maxParticipants: roomData.maxParticipants,
+        status: roomData.status,
+        isActive: roomData.isActive,
+        createdAt: roomData.createdAt?.toDate?.() || roomData.createdAt,
+        lastActivity: roomData.lastActivity?.toDate?.() || roomData.lastActivity
+      });
+      
+      // 2. Get participants
+      console.log('\n👥 === PARTICIPANTS ===');
+      const participantsRef = collection(db, 'rooms', roomId, 'participants');
+      const participantsSnapshot = await getDocs(participantsRef);
+      
+      console.log(`Total participants in DB: ${participantsSnapshot.docs.length}`);
+      console.log(`Room shows: ${roomData.currentParticipants}/${roomData.maxParticipants}`);
+      
+      participantsSnapshot.docs.forEach(participantDoc => {
+        const participantData = participantDoc.data();
+        console.log(`- ${participantData.name} (${participantDoc.id})`, {
+          isHost: participantData.isHost,
+          isActive: participantData.isActive,
+          joinedAt: participantData.joinedAt?.toDate?.() || participantData.joinedAt,
+          email: participantData.email,
+          isCurrentUser: participantDoc.id === user?.uid
+        });
+      });
+      
+      // 3. Check if current user is in participants
+      const isUserInParticipants = participantsSnapshot.docs.some(doc => doc.id === user?.uid);
+      console.log(`\n✅ Current user in participants? ${isUserInParticipants ? 'YES' : 'NO'}`);
+      
+      // 4. Get signaling data
+      console.log('\n📡 === SIGNALING DATA ===');
+      const signalingRef = collection(db, 'rooms', roomId, 'signaling');
+      const signalingSnapshot = await getDocs(signalingRef);
+      
+      console.log(`Signaling users: ${signalingSnapshot.docs.length}`);
+      
+      for (const signalingDoc of signalingSnapshot.docs) {
+        const userId = signalingDoc.id;
+        const signalingData = signalingDoc.data();
+        
+        console.log(`\n👤 User: ${userId} (${signalingData.userName || 'No name'})`);
+        console.log('  📄 Signaling Document:', {
+          isOnline: signalingData.isOnline,
+          readyForConnection: signalingData.readyForConnection,
+          status: signalingData.status,
+          lastSeen: signalingData.lastSeen?.toDate?.() || signalingData.lastSeen
+        });
+        
+        // Check offers
+        const offersRef = collection(db, 'rooms', roomId, 'signaling', userId, 'offers');
+        const offersSnapshot = await getDocs(offersRef);
+        console.log(`  📨 Offers TO this user: ${offersSnapshot.docs.length}`);
+        offersSnapshot.docs.forEach(offerDoc => {
+          const offerData = offerDoc.data();
+          console.log(`    → From: ${offerData.from} (${offerData.fromName}) to: ${offerData.to}`, {
+            type: offerData.type,
+            timestamp: offerData.timestamp?.toDate?.() || offerData.timestamp,
+            docId: offerDoc.id
+          });
+        });
+        
+        // Check answers
+        const answersRef = collection(db, 'rooms', roomId, 'signaling', userId, 'answers');
+        const answersSnapshot = await getDocs(answersRef);
+        console.log(`  📩 Answers TO this user: ${answersSnapshot.docs.length}`);
+        answersSnapshot.docs.forEach(answerDoc => {
+          const answerData = answerDoc.data();
+          console.log(`    → From: ${answerData.from} to: ${answerData.to}`);
+        });
+        
+        // Check candidates
+        const candidatesRef = collection(db, 'rooms', roomId, 'signaling', userId, 'candidates');
+        const candidatesSnapshot = await getDocs(candidatesRef);
+        console.log(`  🧊 ICE Candidates TO this user: ${candidatesSnapshot.docs.length}`);
+      }
+      
+      // 5. Summary
+      console.log('\n📊 === SUMMARY ===');
+      console.log(`Room: ${roomData.name} (${roomId})`);
+      console.log(`Host: ${roomData.hostName} (${roomData.hostId})`);
+      console.log(`Capacity: ${roomData.currentParticipants}/${roomData.maxParticipants}`);
+      console.log(`Current user ${user?.uid} is ${isUserInParticipants ? 'IN' : 'NOT IN'} room`);
+      console.log(`UI shows error: "${error}"`);
+      console.log(`UI loading state: ${loading}`);
+      
+    } catch (error) {
+      console.error('❌ Debug error:', error);
+    }
+  };
+
   // Real-time room updates
   useEffect(() => {
     if (!roomId || !user) return;
 
-    console.log('Setting up real-time listeners for room:', roomId);
+    console.log('🎯 Setting up real-time listeners for room:', roomId);
 
     const unsubscribeRoom = listenToRoom(roomId, (roomData) => {
-      console.log('Room real-time update:', roomData);
+      console.log('📡 Room real-time update:', roomData);
       if (roomData) {
         setRoom(roomData);
+        setCurrentRoom(roomData); // Update RoomContext
+        
+        // Clear error if room is now valid
+        if (error && roomData.isActive && roomData.currentParticipants <= roomData.maxParticipants) {
+          setError('');
+        }
       } else {
         setError('Room was deleted');
       }
     });
 
     const unsubscribeParticipants = listenToParticipants(roomId, (participantsData) => {
-      console.log('Participants real-time update:', participantsData);
+      console.log('👥 Participants real-time update:', participantsData);
       setParticipants(participantsData);
+      
+      // Check if current user is in participants
+      const isUserInRoom = participantsData.some(p => p.id === user.uid);
+      console.log('Current user in room?', isUserInRoom);
+      
+      // If user is in room but UI shows error, clear it
+      if (isUserInRoom && error.includes('Room is full')) {
+        console.log('✅ User is in room, clearing "room is full" error');
+        setError('');
+      }
     });
 
     // Cleanup
     return () => {
-      console.log('Cleaning up real-time listeners');
+      console.log('🧹 Cleaning up real-time listeners');
       unsubscribeRoom();
       unsubscribeParticipants();
     };
-  }, [roomId, user]);
+  }, [roomId, user, error, setCurrentRoom]);
 
-  // Initial load
+  // Initial load - FIXED VERSION
+  const loadRoom = useCallback(async () => {
+    if (!user || !roomId || joinAttempted) {
+      return;
+    }
+    
+    setLoading(true);
+    setError('');
+    setJoinAttempted(true);
+    
+    console.log('=== LOAD ROOM START ===');
+    console.log('User:', user.uid, user.displayName);
+    console.log('Room ID:', roomId);
+
+    try {
+      // Get fresh room data
+      const roomData = await getRoom(roomId);
+      console.log('Room data from service:', roomData);
+      
+      if (!roomData) {
+        setError('Room not found');
+        setLoading(false);
+        return;
+      }
+
+      if (!roomData.isActive || roomData.status === 'ended') {
+        setError('Room is no longer active');
+        setLoading(false);
+        return;
+      }
+
+      // Get participants
+      const participantsData = await getRoomParticipants(roomId);
+      console.log('Participants from service:', participantsData);
+      console.log('Participant IDs:', participantsData.map(p => p.id));
+
+      // Check if user is already in room
+      const isUserInRoom = participantsData.some(p => p.id === user.uid);
+      console.log('Is user already in room?', isUserInRoom);
+
+      // Set initial state
+      setRoom(roomData);
+      setParticipants(participantsData);
+      setCurrentRoom(roomData);
+
+      // If user is already in room, stop here
+      if (isUserInRoom) {
+        console.log('✅ User already in room, loading complete');
+        setLoading(false);
+        
+        // Initialize signaling for peer connections
+        setTimeout(() => {
+          initializeUserSignaling?.();
+        }, 1000);
+        return;
+      }
+
+      // Check if room appears full in UI data
+      const isRoomFull = participantsData.length >= roomData.maxParticipants;
+      console.log('Is room full?', isRoomFull, `(${participantsData.length}/${roomData.maxParticipants})`);
+
+      // Double check with fresh data from Firestore
+      const roomRef = doc(db, 'rooms', roomId);
+      const freshRoomSnap = await getDoc(roomRef);
+      const freshRoomData = freshRoomSnap.data();
+      const freshParticipantsRef = collection(db, 'rooms', roomId, 'participants');
+      const freshParticipantsSnap = await getDocs(freshParticipantsRef);
+      const actualParticipantCount = freshParticipantsSnap.docs.length;
+      
+      console.log('Fresh check - Room capacity:', freshRoomData?.currentParticipants, '/', freshRoomData?.maxParticipants);
+      console.log('Fresh check - Actual participants:', actualParticipantCount);
+      console.log('Fresh check - User in fresh participants?', freshParticipantsSnap.docs.some(doc => doc.id === user.uid));
+
+      // If room is actually full, show error
+      if (actualParticipantCount >= roomData.maxParticipants) {
+        console.log('❌ Room is actually full, cannot join');
+        setError(`Room is full (${actualParticipantCount}/${roomData.maxParticipants} participants)`);
+        setLoading(false);
+        return;
+      }
+
+      // Room has space - try to join
+      console.log('🔄 Attempting to join room...');
+      try {
+        const joinResult = await joinRoomService(roomId, user);
+        console.log('Join result:', joinResult);
+
+        // Wait a bit for Firestore to update
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Get updated data
+        const updatedRoom = await getRoom(roomId);
+        const updatedParticipants = await getRoomParticipants(roomId);
+        
+        console.log('After join - Room:', updatedRoom);
+        console.log('After join - Participants:', updatedParticipants);
+
+        setRoom(updatedRoom);
+        setParticipants(updatedParticipants);
+        setCurrentRoom(updatedRoom);
+
+        // Check if user is now in room
+        const userNowInRoom = updatedParticipants.some(p => p.id === user.uid);
+        console.log('User now in room?', userNowInRoom);
+
+        if (!userNowInRoom) {
+          // Final check with fresh Firestore data
+          const finalCheck = await getDocs(collection(db, 'rooms', roomId, 'participants'));
+          const finalUserInRoom = finalCheck.docs.some(doc => doc.id === user.uid);
+          
+          if (finalUserInRoom) {
+            console.log('✅ Race condition resolved - user IS in room');
+            // User is actually in room, update state
+            const finalParticipants = finalCheck.docs.map(doc => ({
+              id: doc.id,
+              ...doc.data()
+            }));
+            setParticipants(finalParticipants);
+          } else {
+            console.log('❌ User still not in room after join attempt');
+            setError('Failed to join room. Please try again.');
+          }
+        } else {
+          // Success! Initialize signaling
+          console.log('✅ Successfully joined room, initializing signaling...');
+          setTimeout(() => {
+            initializeUserSignaling?.();
+          }, 1500);
+        }
+
+      } catch (joinError) {
+        console.error('Join error:', joinError);
+        
+        // Check current state
+        const currentParticipants = await getRoomParticipants(roomId);
+        const userNowInRoom = currentParticipants.some(p => p.id === user.uid);
+        
+        if (userNowInRoom) {
+          console.log('✅ User actually joined despite error (race condition)');
+          setParticipants(currentParticipants);
+          setError('');
+          
+          // Initialize signaling
+          setTimeout(() => {
+            initializeUserSignaling?.();
+          }, 1500);
+        } else if (joinError.message.includes('full')) {
+          setError('Room is now full. Please try another room.');
+        } else {
+          setError(`Failed to join: ${joinError.message}`);
+        }
+      }
+
+    } catch (err) {
+      console.error('Error in loadRoom:', err);
+      setError(`Failed to load room: ${err.message}`);
+    } finally {
+      setLoading(false);
+      console.log('=== LOAD ROOM END ===');
+    }
+  }, [user, roomId, joinAttempted, setCurrentRoom, initializeUserSignaling]);
+
+  // Initial load on mount
   useEffect(() => {
     if (!user) {
       navigate('/');
@@ -59,155 +374,7 @@ const RoomPage = () => {
     }
 
     loadRoom();
-  }, [roomId, user, navigate]);
-
-const loadRoom = async () => {
-  setLoading(true);
-  setError('');
-  
-  try {
-    console.log('=== LOAD ROOM START ===');
-    console.log('User:', user?.uid);
-    console.log('Room ID:', roomId);
-    
-    // Get room and participants data
-    const roomData = await getRoom(roomId);
-    const participantsData = await getRoomParticipants(roomId);
-    
-    console.log('Room data:', roomData);
-    console.log('Participants:', participantsData);
-    console.log('Participant IDs:', participantsData.map(p => p.id));
-    
-    if (!roomData) {
-      setError('Room not found');
-      setLoading(false);
-      return;
-    }
-
-    if (!roomData.isActive || roomData.status === 'ended') {
-      setError('Room is no longer active');
-      setLoading(false);
-      return;
-    }
-
-    // Check if user is in participants list
-    const isUserInRoom = participantsData.some(p => p.id === user.uid);
-    console.log('Is user in room?', isUserInRoom);
-    
-    // Check if room is full
-    const isRoomFull = roomData.currentParticipants >= roomData.maxParticipants;
-    console.log('Is room full?', isRoomFull, `(${roomData.currentParticipants}/${roomData.maxParticipants})`);
-
-    // Set state
-    setRoom(roomData);
-    setParticipants(participantsData);
-
-    // If user is already in room, stop here
-    if (isUserInRoom) {
-      console.log('User already in room, loading complete');
-      setLoading(false);
-      return;
-    }
-    
-    // If room is full AND user is not in it, show error
-    if (isRoomFull) {
-      console.log('Room is full and user not in it');
-      setError('Room is full. Cannot join.');
-      setLoading(false);
-      return;
-    }
-    
-    // Room has space and user is not in it - try to join
-    console.log('Attempting to join room...');
-    try {
-      const joinResult = await joinRoomService(roomId, user);
-      console.log('Join result:', joinResult);
-      
-      // After joining, refresh data
-      const updatedRoom = await getRoom(roomId);
-      const updatedParticipants = await getRoomParticipants(roomId);
-      
-      console.log('After join - Room:', updatedRoom);
-      console.log('After join - Participants:', updatedParticipants);
-      
-      setRoom(updatedRoom);
-      setParticipants(updatedParticipants);
-      
-      // Double-check user is now in room
-      const userNowInRoom = updatedParticipants.some(p => p.id === user.uid);
-      console.log('User now in room?', userNowInRoom);
-      
-      if (!userNowInRoom) {
-        // Something went wrong with join
-        setError('Failed to join room. Please try again.');
-      }
-      
-    } catch (joinError) {
-      console.error('Join error:', joinError);
-      
-      // Check current state again in case of race condition
-      const currentParticipants = await getRoomParticipants(roomId);
-      const userNowInRoom = currentParticipants.some(p => p.id === user.uid);
-      
-      if (userNowInRoom) {
-        // User actually IS in room (race condition resolved)
-        console.log('Race condition - user is actually in room');
-        setParticipants(currentParticipants);
-        // No error, just continue
-      } else if (joinError.message.includes('full') || joinError.message.includes('permission')) {
-        // Room is full or permission denied
-        const currentRoom = await getRoom(roomId);
-        const currentIsFull = currentRoom.currentParticipants >= currentRoom.maxParticipants;
-        
-        if (currentIsFull) {
-          setError('Room is full. Cannot join.');
-        } else {
-          setError('Permission denied. Please try again.');
-        }
-      } else {
-        setError(`Failed to join: ${joinError.message}`);
-      }
-    }
-    
-  } catch (err) {
-    console.error('Error in loadRoom:', err);
-    setError(`Failed to load room: ${err.message}`);
-  } finally {
-    setLoading(false);
-    console.log('=== LOAD ROOM END ===');
-  }
-};
-
-  // Debug function to check current state
-  const checkRoomState = async () => {
-    console.log('=== ROOM STATE CHECK ===');
-    console.log('UI Room:', room);
-    console.log('UI Participants:', participants);
-    console.log('UI Participant count:', participants?.length);
-    
-    try {
-      const currentRoom = await getRoom(roomId);
-      const currentParticipants = await getRoomParticipants(roomId);
-      console.log('DB Room:', currentRoom);
-      console.log('DB Participants:', currentParticipants);
-      console.log('DB Participant count:', currentParticipants?.length);
-      console.log('=== END CHECK ===');
-    } catch (err) {
-      console.error('Check failed:', err);
-    }
-  };
-
-  // Call checkRoomState when room updates
-  useEffect(() => {
-    if (room && participants) {
-      console.log('Room updated - current state:', {
-        roomId: room.id,
-        participantCount: room.currentParticipants,
-        maxParticipants: room.maxParticipants,
-        actualParticipants: participants.length
-      });
-    }
-  }, [room, participants]);
+  }, [user, navigate, loadRoom]);
 
   const leaveRoom = () => {
     // We'll implement proper leaveRoom in next user story
@@ -221,46 +388,117 @@ const loadRoom = async () => {
     }
   };
 
+  const handleCopyInviteLink = () => {
+    const inviteLink = `${window.location.origin}/room/${roomId}`;
+    navigator.clipboard.writeText(inviteLink);
+    alert(`Invite link copied to clipboard!\n\n${inviteLink}`);
+  };
+
+  // Force refresh room data
+  const refreshRoomData = async () => {
+    console.log('🔄 Manually refreshing room data...');
+    setLoading(true);
+    try {
+      const freshRoom = await getRoom(roomId);
+      const freshParticipants = await getRoomParticipants(roomId);
+      
+      setRoom(freshRoom);
+      setParticipants(freshParticipants);
+      setCurrentRoom(freshRoom);
+      setError('');
+      
+      console.log('✅ Room data refreshed');
+    } catch (err) {
+      console.error('Error refreshing room:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const checkWebRTCConnections = () => {
+  console.clear();
+  console.log('🔍 === WEBRTC CONNECTION DEBUG ===');
+  
+  // Check if we have peer connections
+  console.log('Peers object:', peers);
+  
+  Object.entries(peers).forEach(([peerId, peerData]) => {
+    console.log(`\n👤 Peer: ${peerId} (${peerData.userData?.name})`);
+    console.log('   Connection state:', peerData.connectionState);
+    
+    if (peerData.stream) {
+      console.log('   Stream exists:', !!peerData.stream);
+      console.log('   Stream active:', peerData.stream.active);
+      console.log('   Stream id:', peerData.stream.id);
+      
+      const videoTracks = peerData.stream.getVideoTracks();
+      const audioTracks = peerData.stream.getAudioTracks();
+      
+      console.log('   Video tracks:', videoTracks.length);
+      console.log('   Audio tracks:', audioTracks.length);
+      
+      videoTracks.forEach((track, index) => {
+        console.log(`   Video track ${index}:`, {
+          enabled: track.enabled,
+          readyState: track.readyState,
+          muted: track.muted,
+          kind: track.kind,
+          label: track.label
+        });
+      });
+      
+      audioTracks.forEach((track, index) => {
+        console.log(`   Audio track ${index}:`, {
+          enabled: track.enabled,
+          readyState: track.readyState,
+          muted: track.muted,
+          kind: track.kind,
+          label: track.label
+        });
+      });
+    } else {
+      console.log('   ❌ No stream available');
+    }
+  });
+  
+  // Check if we can access RTCPeerConnection
+  console.log('\n🌐 WebRTC Support:');
+  console.log('   RTCPeerConnection:', typeof RTCPeerConnection !== 'undefined' ? '✅ Available' : '❌ Not available');
+  console.log('   getUserMedia:', typeof navigator.mediaDevices?.getUserMedia !== 'undefined' ? '✅ Available' : '❌ Not available');
+  
+  // Check video elements
+  console.log('\n🎥 Video Elements:');
+  const videoElements = document.querySelectorAll('video');
+  videoElements.forEach((video, index) => {
+    console.log(`   Video ${index}:`, {
+      srcObject: video.srcObject,
+      readyState: video.readyState,
+      error: video.error,
+      paused: video.paused,
+      muted: video.muted,
+      isRemote: !video.muted
+    });
+  });
+};
+
   if (loading) {
     return (
       <div style={styles.loadingContainer}>
         <div style={styles.spinner}></div>
         <p style={styles.loadingText}>Loading room...</p>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div style={styles.errorContainer}>
-        <div style={styles.errorIcon}>⚠️</div>
-        <h2 style={styles.errorTitle}>Room Unavailable</h2>
-        <p style={styles.errorMessage}>{error}</p>
         <button 
-          onClick={() => navigate('/dashboard')}
-          style={styles.backButton}
+          onClick={refreshRoomData}
+          style={styles.refreshButton}
         >
-          Back to Dashboard
+          Force Refresh
         </button>
       </div>
     );
   }
 
-  if (!room) {
-    return (
-      <div style={styles.errorContainer}>
-        <h2 style={styles.errorTitle}>Room Not Found</h2>
-        <button 
-          onClick={() => navigate('/dashboard')}
-          style={styles.backButton}
-        >
-          Back to Dashboard
-        </button>
-      </div>
-    );
-  }
-
-  if (error && error.includes('Room is full')) {
+  // Show room full error only if user is NOT in participants
+  const isUserInRoom = participants.some(p => p.id === user?.uid);
+  if (error && error.includes('full') && !isUserInRoom) {
     return (
       <div style={styles.fullRoomContainer}>
         <div style={styles.fullRoomContent}>
@@ -273,22 +511,75 @@ const loadRoom = async () => {
             <p><strong>Room:</strong> {room?.name}</p>
             <p><strong>Host:</strong> {room?.hostName}</p>
             <p><strong>Current Participants:</strong> {room?.currentParticipants}/{room?.maxParticipants}</p>
+            <p><strong>You are in room?</strong> {isUserInRoom ? 'YES' : 'NO'}</p>
+          </div>
+          <div style={styles.debugInfo}>
+            <button onClick={debugFirestoreStructure} style={styles.debugButton}>
+              🔍 Debug Firestore
+            </button>
+            <button onClick={refreshRoomData} style={styles.debugButton}>
+              🔄 Refresh Data
+            </button>
           </div>
           <div style={styles.fullRoomActions}>
-            <button 
+            <button
               onClick={() => navigate('/dashboard')}
               style={styles.fullRoomButton}
             >
               Back to Dashboard
             </button>
-            <button 
-              onClick={() => window.location.reload()}
-              style={styles.fullRoomButtonSecondary}
-            >
-              Try Again
-            </button>
+            {!isUserInRoom && (
+              <button
+                onClick={async () => {
+                  console.log('🔄 Retrying join...');
+                  setJoinAttempted(false);
+                  await loadRoom();
+                }}
+                style={styles.fullRoomButtonSecondary}
+              >
+                Try Again
+              </button>
+            )}
           </div>
         </div>
+      </div>
+    );
+  }
+
+  if (error && !error.includes('full')) {
+    return (
+      <div style={styles.errorContainer}>
+        <div style={styles.errorIcon}>⚠️</div>
+        <h2 style={styles.errorTitle}>Room Unavailable</h2>
+        <p style={styles.errorMessage}>{error}</p>
+        <div style={styles.errorActions}>
+          <button
+            onClick={() => navigate('/dashboard')}
+            style={styles.backButton}
+          >
+            Back to Dashboard
+          </button>
+          <button
+            onClick={refreshRoomData}
+            style={styles.refreshButton}
+          >
+            Try Again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!room) {
+    return (
+      <div style={styles.errorContainer}>
+        <h2 style={styles.errorTitle}>Room Not Found</h2>
+        <button
+          onClick={() => navigate('/dashboard')}
+          style={styles.backButton}
+        >
+          Back to Dashboard
+        </button>
       </div>
     );
   }
@@ -298,7 +589,7 @@ const loadRoom = async () => {
       {/* Room Header */}
       <header style={styles.header}>
         <div style={styles.headerLeft}>
-          <button 
+          <button
             onClick={() => navigate('/dashboard')}
             style={styles.backButton}
           >
@@ -316,12 +607,15 @@ const loadRoom = async () => {
               <span style={styles.roomStatus} data-status={room.status}>
                 {room.status}
               </span>
+              {!isUserInRoom && (
+                <span style={styles.warningBadge}>Not in room</span>
+              )}
             </div>
           </div>
         </div>
-        
+
         <div style={styles.headerRight}>
-          <button 
+          <button
             onClick={leaveRoom}
             style={styles.leaveButton}
           >
@@ -331,23 +625,50 @@ const loadRoom = async () => {
       </header>
 
       <main style={styles.main}>
-        {/* Video Area Placeholder */}
+        {/* Video Area */}
         <div style={styles.videoSection}>
-          <div style={styles.videoPlaceholder}>
-            <div style={styles.videoIcon}>🎥</div>
-            <h3 style={styles.videoTitle}>Video Chat</h3>
-            <p style={styles.videoDescription}>
-              Video chat functionality will be available in the next update.
-            </p>
-            <div style={styles.videoStats}>
-              <div style={styles.stat}>
-                <span style={styles.statNumber}>{participants.length}</span>
-                <span style={styles.statLabel}>Connected</span>
-              </div>
-              <div style={styles.stat}>
-                <span style={styles.statNumber}>{room.maxParticipants - participants.length}</span>
-                <span style={styles.statLabel}>Slots Available</span>
-              </div>
+          {/* Local Video Preview */}
+          <div style={styles.videoContainer}>
+            <LocalVideoPreview />
+          </div>
+
+          {/* Remote Videos */}
+          {Object.entries(peers).map(([peerId, peerData]) => (
+            <div key={peerId} style={styles.videoContainer}>
+              <RemoteVideo
+                stream={peerData.stream}
+                userData={peerData.userData}
+                connectionState={peerData.connectionState}
+              />
+            </div>
+          ))}
+
+          {/* Show message if no connections yet */}
+          {Object.keys(peers).length === 0 && connectionStatus === 'connected' && (
+            <div style={styles.noConnectionsMessage}>
+              <div style={styles.noConnectionsIcon}>👥</div>
+              <p style={styles.noConnectionsText}>Connected to room</p>
+              <p style={styles.noConnectionsSubtext}>
+                Waiting for other participants to join...
+              </p>
+              <p style={styles.inviteHint}>
+                Share room code: <strong>#{room?.roomCode}</strong>
+              </p>
+            </div>
+          )}
+
+          {/* Connection Status */}
+          <div style={styles.connectionStatus}>
+            <div style={{
+              ...styles.statusIndicator,
+              backgroundColor: connectionStatus === 'connected' ? '#10b981' :
+                connectionStatus === 'connecting' ? '#f59e0b' :
+                  '#ef4444'
+            }}>
+              {connectionStatus.toUpperCase()}
+            </div>
+            <div style={styles.statusText}>
+              {activeConnections} connection{activeConnections !== 1 ? 's' : ''} active
             </div>
           </div>
         </div>
@@ -359,21 +680,29 @@ const loadRoom = async () => {
             <span style={styles.participantBadge}>
               {participants.length}
             </span>
+            <button 
+              onClick={refreshRoomData}
+              style={styles.refreshSmallButton}
+              title="Refresh participants"
+            >
+              🔄
+            </button>
           </div>
-          
+
           <div style={styles.participantsList}>
             {participants.map(participant => (
-              <div 
-                key={participant.id} 
+              <div
+                key={participant.id}
                 style={{
                   ...styles.participantItem,
-                  ...(participant.isHost ? styles.hostItem : {})
+                  ...(participant.isHost ? styles.hostItem : {}),
+                  ...(participant.id === user?.uid ? styles.currentUserItem : {})
                 }}
               >
                 <div style={styles.participantAvatar}>
                   {participant.photoURL ? (
-                    <img 
-                      src={participant.photoURL} 
+                    <img
+                      src={participant.photoURL}
                       alt={participant.name}
                       style={styles.avatarImage}
                     />
@@ -386,7 +715,7 @@ const loadRoom = async () => {
                     <div style={styles.hostBadge} title="Host">👑</div>
                   )}
                 </div>
-                
+
                 <div style={styles.participantInfo}>
                   <div style={styles.participantName}>
                     {participant.name}
@@ -399,9 +728,9 @@ const loadRoom = async () => {
                     {participant.isActive ? 'Online' : 'Offline'}
                   </div>
                 </div>
-                
+
                 {room.hostId === user?.uid && !participant.isHost && (
-                  <button 
+                  <button
                     style={styles.kickButton}
                     title="Kick participant"
                     onClick={() => alert(`Kick ${participant.name} - Coming soon`)}
@@ -417,26 +746,40 @@ const loadRoom = async () => {
           <div style={styles.controlsSection}>
             <h4 style={styles.controlsTitle}>Room Controls</h4>
             <div style={styles.controlsGrid}>
-              <button 
-                style={styles.controlButton}
-                onClick={() => alert('Mute/Unmute - Coming soon')}
+              <button
+                style={{
+                  ...styles.controlButton,
+                  ...(isMicOn ? styles.controlButtonActive : styles.controlButtonInactive)
+                }}
+                onClick={toggleMicrophone}
+                disabled={mediaLoading}
               >
-                🎤 Mic
+                {isMicOn ? '🎤 Mic On' : '🔇 Mic Muted'}
               </button>
-              <button 
-                style={styles.controlButton}
-                onClick={() => alert('Camera On/Off - Coming soon')}
+              <button
+                style={{
+                  ...styles.controlButton,
+                  ...(isCameraOn ? styles.controlButtonActive : styles.controlButtonInactive)
+                }}
+                onClick={toggleCamera}
+                disabled={mediaLoading}
               >
-                📹 Camera
+                {isCameraOn ? '📹 Camera On' : '📷 Camera Off'}
               </button>
-              <button 
+              <button
                 style={styles.controlButton}
-                onClick={copyRoomCode}
+                onClick={handleCopyInviteLink}
               >
                 🔗 Invite
               </button>
+              <button
+                style={styles.controlButton}
+                onClick={() => navigator.clipboard.writeText(`#${room.roomCode}`)}
+              >
+                📋 Copy Code
+              </button>
               {room.hostId === user?.uid && (
-                <button 
+                <button
                   style={styles.controlButtonDanger}
                   onClick={() => alert('End Room - Coming soon')}
                 >
@@ -444,40 +787,181 @@ const loadRoom = async () => {
                 </button>
               )}
             </div>
+
+            {/* Media status */}
+            {mediaError && (
+              <div style={styles.mediaError}>
+                ⚠️ {mediaError}
+              </div>
+            )}
+
+            {/* Peer connections status */}
+            <div style={styles.peersStatus}>
+              <div style={styles.peersStatusHeader}>
+                <span>Active Connections:</span>
+                <span style={{
+                  color: activeConnections > 0 ? '#10b981' : '#f59e0b',
+                  fontWeight: '600'
+                }}>
+                  {activeConnections}
+                </span>
+              </div>
+              {Object.entries(peers).map(([peerId, peerData]) => (
+                <div key={peerId} style={styles.peerItem}>
+                  <span style={styles.peerName}>
+                    {peerData.userData?.name || 'Peer'}
+                  </span>
+                  <span style={{
+                    ...styles.peerStatus,
+                    color: peerData.connectionState === 'connected' ? '#10b981' :
+                           peerData.connectionState === 'connecting' ? '#f59e0b' :
+                           '#ef4444'
+                  }}>
+                    {peerData.connectionState || 'unknown'}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
         </aside>
       </main>
 
-      <div style={styles.statusContainer}>
-  <div style={{
-    ...styles.statusIndicator,
-    backgroundColor: room?.currentParticipants >= room?.maxParticipants ? '#ef4444' : '#10b981'
-  }}>
-    {room?.currentParticipants >= room?.maxParticipants ? 'FULL' : 'AVAILABLE'}
-  </div>
-  <div style={styles.statusText}>
-    {room?.currentParticipants}/{room?.maxParticipants} participants
-    {room?.currentParticipants >= room?.maxParticipants && 
-      ' (Room is full)'}
-  </div>
-</div>
+      {/* Debug Panel */}
+      <details style={styles.debugPanel}>
+        <summary style={styles.debugSummary}>🔧 Debug Panel</summary>
+        <ConnectionDebug />
+        <div style={styles.debugActions}>
+          <button 
+            onClick={debugFirestoreStructure}
+            style={styles.debugButton}
+          >
+            🔍 Debug Firestore
+          </button>
+          <button 
+            onClick={debugRoomState}
+            style={styles.debugButton}
+          >
+            Check Room State
+          </button>
+          <button 
+            onClick={() => console.log('Peers:', peers)}
+            style={styles.debugButton}
+          >
+            Log Peers
+          </button>
+          <button 
+            onClick={refreshRoomData}
+            style={styles.debugButton}
+          >
+            Refresh Data
+          </button>
+          {room?.hostId === user?.uid && participants.length > 1 && (
+            <button 
+              onClick={() => {
+                const otherParticipant = participants.find(p => p.id !== user?.uid);
+                if (otherParticipant) {
+                  console.log('Manual connect to:', otherParticipant);
+                  connectToUser(otherParticipant.id, {
+                    name: otherParticipant.name,
+                    photoURL: otherParticipant.photoURL
+                  });
+                }
+              }}
+              style={styles.debugButton}
+            >
+              🔗 Manual Connect
+            </button>
+          )}
+        </div>
+      </details>
 
-      {/* Room Info Footer */}
+      <button
+        style={styles.controlButton}
+        onClick={checkWebRTCConnections}
+      >
+        🔍 Debug WebRTC
+      </button>
+
+      <button
+  style={styles.controlButton}
+  onClick={() => {
+    // Create a test video stream
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 480;
+    const ctx = canvas.getContext('2d');
+    
+    // Draw test pattern
+    const gradient = ctx.createLinearGradient(0, 0, 640, 480);
+    gradient.addColorStop(0, '#8b5cf6');
+    gradient.addColorStop(1, '#3b82f6');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 640, 480);
+    
+    // Add text
+    ctx.fillStyle = 'white';
+    ctx.font = 'bold 30px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('TEST VIDEO', 320, 200);
+    ctx.font = '20px Arial';
+    ctx.fillText('Remote Stream Test', 320, 240);
+    ctx.fillText(new Date().toLocaleTimeString(), 320, 280);
+    
+    // Create stream
+    const testStream = canvas.captureStream(30);
+    const videoTrack = testStream.getVideoTracks()[0];
+    videoTrack.enabled = true;
+    
+    console.log('🎬 Created test stream:', testStream);
+    console.log('   Video track:', videoTrack);
+    
+    // If we have peers, update the first one with test stream
+    if (Object.keys(peers).length > 0) {
+      const firstPeerId = Object.keys(peers)[0];
+      console.log(`Adding test stream to peer: ${firstPeerId}`);
+      
+      setPeers(prev => ({
+        ...prev,
+        [firstPeerId]: {
+          ...prev[firstPeerId],
+          stream: testStream
+        }
+      }));
+    }
+  }}
+>
+  🎬 Test Video
+</button>
+
+      {/* Room Status Footer */}
       <footer style={styles.footer}>
         <div style={styles.footerContent}>
           <div style={styles.footerInfo}>
             <span>Room created by {room.hostName}</span>
             <span style={styles.footerSeparator}>•</span>
-            <span>Host controls enabled</span>
+            <span>You are {room.hostId === user?.uid ? 'the host' : 'a participant'}</span>
+            <span style={styles.footerSeparator}>•</span>
+            <span style={{
+              color: connectionStatus === 'connected' ? '#10b981' :
+                     connectionStatus === 'connecting' ? '#f59e0b' : '#ef4444'
+            }}>
+              {connectionStatus.toUpperCase()}
+            </span>
+            {!isUserInRoom && (
+              <>
+                <span style={styles.footerSeparator}>•</span>
+                <span style={{color: '#ef4444'}}>NOT IN ROOM</span>
+              </>
+            )}
           </div>
           <div style={styles.footerActions}>
-            <button 
+            <button
               style={styles.footerButton}
-              onClick={copyRoomCode}
+              onClick={handleCopyInviteLink}
             >
-              Copy Invite Code
+              Copy Invite Link
             </button>
-            <button 
+            <button
               style={styles.footerButton}
               onClick={() => alert('Settings - Coming soon')}
             >
@@ -504,7 +988,8 @@ const styles = {
     flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'var(--bg-dark)'
+    backgroundColor: 'var(--bg-dark)',
+    gap: '20px'
   },
   spinner: {
     width: '50px',
@@ -513,11 +998,20 @@ const styles = {
     borderTopColor: 'var(--primary-purple)',
     borderRadius: '50%',
     animation: 'spin 1s linear infinite',
-    marginBottom: '20px'
+    marginBottom: '10px'
   },
   loadingText: {
     color: 'var(--text-gray)',
     fontSize: '1.1rem'
+  },
+  refreshButton: {
+    padding: '10px 20px',
+    backgroundColor: 'rgba(59, 130, 246, 0.2)',
+    border: '1px solid rgba(59, 130, 246, 0.3)',
+    borderRadius: 'var(--radius-md)',
+    color: '#93c5fd',
+    cursor: 'pointer',
+    fontSize: '0.9rem'
   },
   errorContainer: {
     minHeight: '100vh',
@@ -527,7 +1021,8 @@ const styles = {
     justifyContent: 'center',
     backgroundColor: 'var(--bg-dark)',
     textAlign: 'center',
-    padding: '20px'
+    padding: '20px',
+    gap: '20px'
   },
   errorIcon: {
     fontSize: '4rem',
@@ -544,6 +1039,97 @@ const styles = {
     fontSize: '1.1rem',
     maxWidth: '400px'
   },
+  errorActions: {
+    display: 'flex',
+    gap: '15px'
+  },
+  backButton: {
+    padding: '10px 20px',
+    backgroundColor: 'var(--primary-purple)',
+    border: 'none',
+    borderRadius: 'var(--radius-md)',
+    color: 'white',
+    cursor: 'pointer',
+    fontSize: '1rem',
+    transition: 'all 0.2s ease'
+  },
+  fullRoomContainer: {
+    minHeight: '100vh',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'var(--bg-dark)',
+    padding: '20px'
+  },
+  fullRoomContent: {
+    background: 'var(--bg-card)',
+    padding: '40px',
+    borderRadius: 'var(--radius-xl)',
+    border: '1px solid var(--border-medium)',
+    textAlign: 'center',
+    maxWidth: '500px'
+  },
+  fullRoomIcon: {
+    fontSize: '4rem',
+    marginBottom: '20px'
+  },
+  fullRoomTitle: {
+    fontSize: '2rem',
+    marginBottom: '15px',
+    color: 'var(--text-light)'
+  },
+  fullRoomMessage: {
+    color: 'var(--text-gray)',
+    marginBottom: '25px',
+    fontSize: '1.1rem'
+  },
+  fullRoomDetails: {
+    textAlign: 'left',
+    marginBottom: '30px',
+    padding: '20px',
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderRadius: 'var(--radius-md)',
+    fontSize: '0.9rem'
+  },
+  debugInfo: {
+    display: 'flex',
+    gap: '10px',
+    justifyContent: 'center',
+    marginBottom: '20px'
+  },
+  debugButton: {
+    padding: '8px 16px',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    border: '1px solid var(--border-light)',
+    borderRadius: 'var(--radius-md)',
+    color: 'var(--text-light)',
+    cursor: 'pointer',
+    fontSize: '0.8rem'
+  },
+  fullRoomActions: {
+    display: 'flex',
+    gap: '15px',
+    justifyContent: 'center'
+  },
+  fullRoomButton: {
+    padding: '12px 24px',
+    backgroundColor: 'var(--primary-purple)',
+    border: 'none',
+    borderRadius: 'var(--radius-md)',
+    color: 'white',
+    cursor: 'pointer',
+    fontSize: '1rem',
+    fontWeight: '500'
+  },
+  fullRoomButtonSecondary: {
+    padding: '12px 24px',
+    backgroundColor: 'transparent',
+    border: '1px solid var(--border-light)',
+    borderRadius: 'var(--radius-md)',
+    color: 'var(--text-light)',
+    cursor: 'pointer',
+    fontSize: '1rem'
+  },
   header: {
     backgroundColor: 'var(--bg-card)',
     borderBottom: '1px solid var(--border-light)',
@@ -556,16 +1142,6 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     gap: '20px'
-  },
-  backButton: {
-    padding: '8px 16px',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    border: '1px solid var(--border-light)',
-    borderRadius: 'var(--radius-md)',
-    color: 'var(--text-light)',
-    cursor: 'pointer',
-    fontSize: '0.9rem',
-    transition: 'all 0.2s ease'
   },
   roomInfo: {
     display: 'flex',
@@ -583,7 +1159,8 @@ const styles = {
     alignItems: 'center',
     gap: '15px',
     fontSize: '0.9rem',
-    color: 'var(--text-gray)'
+    color: 'var(--text-gray)',
+    flexWrap: 'wrap'
   },
   roomCode: {
     backgroundColor: 'rgba(124, 58, 237, 0.2)',
@@ -606,13 +1183,12 @@ const styles = {
     fontWeight: '500',
     textTransform: 'capitalize'
   },
-  'roomStatus[data-status="waiting"]': {
-    backgroundColor: 'rgba(245, 158, 11, 0.2)',
-    color: '#fbbf24'
-  },
-  'roomStatus[data-status="active"]': {
-    backgroundColor: 'rgba(34, 197, 94, 0.2)',
-    color: '#4ade80'
+  warningBadge: {
+    padding: '4px 8px',
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+    color: '#f87171',
+    borderRadius: '4px',
+    fontWeight: '500'
   },
   headerRight: {
     display: 'flex',
@@ -638,54 +1214,88 @@ const styles = {
   },
   videoSection: {
     flex: 3,
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+    gap: '15px',
     backgroundColor: 'var(--bg-card-light)',
     borderRadius: 'var(--radius-lg)',
     border: '1px solid var(--border-light)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: '500px'
+    padding: '15px',
+    minHeight: '500px',
+    overflowY: 'auto',
+    position: 'relative'
   },
-  videoPlaceholder: {
+  videoContainer: {
+    position: 'relative',
+    backgroundColor: '#000',
+    borderRadius: 'var(--radius-md)',
+    overflow: 'hidden',
+    aspectRatio: '16/9',
+    minHeight: '250px',
+    border: '2px solid var(--border-light)'
+  },
+  noConnectionsMessage: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    transform: 'translate(-50%, -50%)',
     textAlign: 'center',
-    padding: '40px'
+    padding: '40px',
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    borderRadius: 'var(--radius-lg)',
+    backdropFilter: 'blur(10px)',
+    border: '1px solid var(--border-light)',
+    zIndex: 10
   },
-  videoIcon: {
-    fontSize: '5rem',
-    marginBottom: '20px',
-    opacity: 0.5
+  noConnectionsIcon: {
+    fontSize: '3rem',
+    marginBottom: '15px',
+    opacity: 0.7
   },
-  videoTitle: {
-    fontSize: '2rem',
+  noConnectionsText: {
+    fontSize: '1.5rem',
     marginBottom: '10px',
     color: 'var(--text-light)'
   },
-  videoDescription: {
+  noConnectionsSubtext: {
     color: 'var(--text-gray)',
-    marginBottom: '30px',
-    fontSize: '1.1rem',
-    maxWidth: '400px'
+    marginBottom: '15px',
+    fontSize: '1rem'
   },
-  videoStats: {
-    display: 'flex',
-    justifyContent: 'center',
-    gap: '40px',
-    marginTop: '30px'
-  },
-  stat: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center'
-  },
-  statNumber: {
-    fontSize: '2.5rem',
-    fontWeight: '700',
-    color: 'var(--primary-purple)'
-  },
-  statLabel: {
-    color: 'var(--text-gray)',
+  inviteHint: {
+    color: '#a78bfa',
     fontSize: '0.9rem',
-    marginTop: '5px'
+    backgroundColor: 'rgba(124, 58, 237, 0.1)',
+    padding: '8px 12px',
+    borderRadius: 'var(--radius-md)',
+    display: 'inline-block'
+  },
+  connectionStatus: {
+    position: 'absolute',
+    bottom: '20px',
+    right: '20px',
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    color: 'white',
+    padding: '8px 12px',
+    borderRadius: 'var(--radius-md)',
+    fontSize: '0.9rem',
+    zIndex: 100,
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    backdropFilter: 'blur(10px)'
+  },
+  statusIndicator: {
+    padding: '4px 8px',
+    borderRadius: '12px',
+    color: 'white',
+    fontWeight: '600',
+    fontSize: '0.8rem',
+    textTransform: 'uppercase'
+  },
+  statusText: {
+    fontSize: '0.8rem',
+    opacity: 0.9
   },
   sidebar: {
     flex: 1,
@@ -719,6 +1329,15 @@ const styles = {
     fontSize: '0.8rem',
     fontWeight: '600'
   },
+  refreshSmallButton: {
+    background: 'none',
+    border: 'none',
+    color: 'var(--text-gray)',
+    cursor: 'pointer',
+    fontSize: '1rem',
+    padding: '5px',
+    borderRadius: '4px'
+  },
   participantsList: {
     display: 'flex',
     flexDirection: 'column',
@@ -737,6 +1356,10 @@ const styles = {
   hostItem: {
     backgroundColor: 'rgba(124, 58, 237, 0.1)',
     borderLeft: '3px solid var(--primary-purple)'
+  },
+  currentUserItem: {
+    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+    borderLeft: '3px solid #3b82f6'
   },
   participantAvatar: {
     position: 'relative',
@@ -831,7 +1454,8 @@ const styles = {
   controlsGrid: {
     display: 'grid',
     gridTemplateColumns: 'repeat(2, 1fr)',
-    gap: '10px'
+    gap: '10px',
+    marginBottom: '20px'
   },
   controlButton: {
     padding: '12px',
@@ -846,6 +1470,16 @@ const styles = {
     justifyContent: 'center',
     gap: '8px',
     transition: 'all 0.2s ease'
+  },
+  controlButtonActive: {
+    backgroundColor: 'rgba(34, 197, 94, 0.2)',
+    borderColor: 'rgba(34, 197, 94, 0.5)',
+    color: '#4ade80'
+  },
+  controlButtonInactive: {
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+    borderColor: 'rgba(239, 68, 68, 0.5)',
+    color: '#f87171'
   },
   controlButtonDanger: {
     gridColumn: '1 / -1',
@@ -862,10 +1496,70 @@ const styles = {
     gap: '8px',
     transition: 'all 0.2s ease'
   },
+  mediaError: {
+    marginTop: '10px',
+    padding: '8px 12px',
+    backgroundColor: 'rgba(245, 158, 11, 0.2)',
+    border: '1px solid rgba(245, 158, 11, 0.3)',
+    borderRadius: 'var(--radius-md)',
+    color: '#fbbf24',
+    fontSize: '0.8rem'
+  },
+  peersStatus: {
+    marginTop: '20px',
+    padding: '15px',
+    backgroundColor: 'rgba(0, 0, 0, 0.2)',
+    borderRadius: 'var(--radius-md)'
+  },
+  peersStatusHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    marginBottom: '10px',
+    fontSize: '0.9rem'
+  },
+  peerItem: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '6px 0',
+    fontSize: '0.8rem'
+  },
+  peerName: {
+    color: 'var(--text-gray)'
+  },
+  peerStatus: {
+    fontWeight: '500',
+    fontSize: '0.75rem',
+    textTransform: 'uppercase'
+  },
+  debugPanel: {
+    margin: '20px',
+    padding: '15px',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    borderRadius: 'var(--radius-md)',
+    border: '1px solid var(--border-light)'
+  },
+  debugSummary: {
+    cursor: 'pointer',
+    padding: '10px',
+    backgroundColor: 'rgba(59, 130, 246, 0.2)',
+    border: '1px solid rgba(59, 130, 246, 0.3)',
+    borderRadius: 'var(--radius-md)',
+    color: '#93c5fd',
+    fontWeight: '500',
+    marginBottom: '15px'
+  },
+  debugActions: {
+    display: 'flex',
+    gap: '10px',
+    marginTop: '15px',
+    flexWrap: 'wrap'
+  },
   footer: {
     backgroundColor: 'var(--bg-card)',
     borderTop: '1px solid var(--border-light)',
-    padding: '15px 20px'
+    padding: '15px 20px',
+    marginTop: 'auto'
   },
   footerContent: {
     display: 'flex',
@@ -877,7 +1571,8 @@ const styles = {
     alignItems: 'center',
     gap: '10px',
     color: 'var(--text-gray)',
-    fontSize: '0.9rem'
+    fontSize: '0.9rem',
+    flexWrap: 'wrap'
   },
   footerSeparator: {
     opacity: 0.5
@@ -895,24 +1590,7 @@ const styles = {
     cursor: 'pointer',
     fontSize: '0.9rem',
     transition: 'all 0.2s ease'
-  },
-  statusContainer: {
-  display: 'flex',
-  alignItems: 'center',
-  gap: '10px',
-  marginBottom: '15px'
-},
-statusIndicator: {
-  padding: '5px 10px',
-  borderRadius: '20px',
-  color: 'white',
-  fontWeight: 'bold',
-  fontSize: '0.8rem'
-},
-statusText: {
-  color: 'var(--text-gray)',
-  fontSize: '0.9rem'
-}
+  }
 };
 
 export default RoomPage;

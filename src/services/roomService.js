@@ -197,30 +197,62 @@ export const joinRoom = async (roomId, user) => {
     
     // Use transaction for atomic operation
     console.log('Starting transaction to join room...');
-    await runTransaction(db, async (transaction) => {
-      // Get fresh data within transaction
-      const freshRoomSnap = await transaction.get(roomRef);
-      if (!freshRoomSnap.exists()) {
-        throw new Error('Room not found');
-      }
+    
+    try {
+      const result = await runTransaction(db, async (transaction) => {
+        // Get fresh data within transaction
+        const freshRoomSnap = await transaction.get(roomRef);
+        if (!freshRoomSnap.exists()) {
+          throw new Error('Room not found');
+        }
+        
+        const freshRoomData = freshRoomSnap.data();
+        console.log('Fresh room data in transaction:', freshRoomData);
+        
+        // Check again if room is full
+        if (freshRoomData.currentParticipants >= freshRoomData.maxParticipants) {
+          throw new Error('Room is now full');
+        }
+        
+        // Check again if user already joined (race condition)
+        const freshParticipantSnap = await transaction.get(participantRef);
+        if (freshParticipantSnap.exists()) {
+          console.log('User already joined (race condition detected)');
+          return { alreadyJoined: true };
+        }
+        
+        // Add participant
+        transaction.set(participantRef, {
+          name: user.displayName,
+          email: user.email,
+          photoURL: user.photoURL || '',
+          joinedAt: serverTimestamp(),
+          isHost: false,
+          isActive: true
+        });
+        
+        // Update participant count
+        transaction.update(roomRef, {
+          currentParticipants: freshRoomData.currentParticipants + 1,
+          lastActivity: serverTimestamp()
+        });
+        
+        console.log('Transaction successful - user joined');
+        return { success: true, newCount: freshRoomData.currentParticipants + 1 };
+      });
       
-      const freshRoomData = freshRoomSnap.data();
-      console.log('Fresh room data in transaction:', freshRoomData);
+      console.log('Transaction result:', result);
+      console.log('=== JOIN SUCCESSFUL ===');
+      return result;
       
-      // Check again if room is full
-      if (freshRoomData.currentParticipants >= freshRoomData.maxParticipants) {
-        throw new Error('Room is now full');
-      }
+    } catch (transactionError) {
+      console.error('Transaction error:', transactionError);
       
-      // Check again if user already joined (race condition)
-      const freshParticipantSnap = await transaction.get(participantRef);
-      if (freshParticipantSnap.exists()) {
-        console.log('User already joined (race condition detected)');
-        return; // User already joined, nothing to do
-      }
+      // Fallback: Try non-transactional approach
+      console.log('Trying non-transactional approach...');
       
       // Add participant
-      transaction.set(participantRef, {
+      await setDoc(participantRef, {
         name: user.displayName,
         email: user.email,
         photoURL: user.photoURL || '',
@@ -230,16 +262,14 @@ export const joinRoom = async (roomId, user) => {
       });
       
       // Update participant count
-      transaction.update(roomRef, {
-        currentParticipants: freshRoomData.currentParticipants + 1,
+      await updateDoc(roomRef, {
+        currentParticipants: increment(1),
         lastActivity: serverTimestamp()
       });
       
-      console.log('Transaction successful - user joined');
-    });
-    
-    console.log('=== JOIN SUCCESSFUL ===');
-    return { success: true };
+      console.log('Non-transactional join successful');
+      return { success: true, fallback: true };
+    }
     
   } catch (error) {
     console.error('Join room error:', error);
@@ -256,6 +286,44 @@ export const joinRoom = async (roomId, user) => {
     }
     
     throw error;
+  }
+};
+
+export const debugRoomState = async (roomId, userId) => {
+  try {
+    console.log('=== DEBUG ROOM STATE ===');
+    
+    // Check room
+    const roomRef = doc(db, 'rooms', roomId);
+    const roomSnap = await getDoc(roomRef);
+    
+    if (roomSnap.exists()) {
+      const roomData = roomSnap.data();
+      console.log('Room data:', roomData);
+      console.log(`Participants: ${roomData.currentParticipants}/${roomData.maxParticipants}`);
+    } else {
+      console.log('Room not found');
+    }
+    
+    // Check participant
+    const participantRef = doc(db, 'rooms', roomId, 'participants', userId);
+    const participantSnap = await getDoc(participantRef);
+    
+    console.log('Participant exists?', participantSnap.exists());
+    if (participantSnap.exists()) {
+      console.log('Participant data:', participantSnap.data());
+    }
+    
+    // Check all participants
+    const participantsRef = collection(db, 'rooms', roomId, 'participants');
+    const allParticipants = await getDocs(participantsRef);
+    console.log('All participants count:', allParticipants.docs.length);
+    allParticipants.docs.forEach(doc => {
+      console.log(`- ${doc.id}: ${doc.data().name}`);
+    });
+    
+  } catch (error) {
+    console.error('Debug error:', error);
   }
 };
 // Leave a room

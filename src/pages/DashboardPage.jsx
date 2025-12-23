@@ -86,22 +86,35 @@ const DashboardPage = () => {
   };
 
   const formatTimeAgo = (timestamp) => {
-    if (!timestamp) return 'Just now';
-    
-    const now = new Date();
-    const created = timestamp.toDate();
-    const diffMs = now - created;
-    const diffMins = Math.floor(diffMs / 60000);
-    
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    
-    const diffHours = Math.floor(diffMins / 60);
-    if (diffHours < 24) return `${diffHours}h ago`;
-    
-    const diffDays = Math.floor(diffHours / 24);
-    return `${diffDays}d ago`;
-  };
+  if (!timestamp) return 'Just now';
+  
+  let date;
+  
+  // Handle both Firestore timestamp and regular date
+  if (timestamp.toDate) {
+    date = timestamp.toDate();
+  } else if (timestamp instanceof Date) {
+    date = timestamp;
+  } else if (timestamp.seconds) {
+    // Firestore timestamp { seconds, nanoseconds }
+    date = new Date(timestamp.seconds * 1000);
+  } else {
+    return 'Just now';
+  }
+  
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMins = Math.floor(diffMs / 60000);
+  
+  if (diffMins < 1) return 'Just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
+};
 
   const isRoomFull = (room) => {
     return room.currentParticipants >= room.maxParticipants;
