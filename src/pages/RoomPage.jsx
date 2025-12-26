@@ -1,4 +1,4 @@
-// pages/RoomPage.jsx - COMPLETE UPDATED VERSION
+// pages/RoomPage.jsx - UPDATED WITH FIXED PEER CONTEXT
 import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
@@ -25,13 +25,13 @@ const RoomPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { setCurrentRoom } = useRoom();
+  const { remoteStream, connectionStatus, hangUp } = usePeer();
 
   const [room, setRoom] = useState(null);
   const [participants, setParticipants] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [joinAttempted, setJoinAttempted] = useState(false);
-  const { peers, connectionStatus, activeConnections, initializeUserSignaling, connectToUser } = usePeer();
   const {
     localStream,
     isCameraOn,
@@ -154,6 +154,8 @@ const RoomPage = () => {
       console.log(`Current user ${user?.uid} is ${isUserInParticipants ? 'IN' : 'NOT IN'} room`);
       console.log(`UI shows error: "${error}"`);
       console.log(`UI loading state: ${loading}`);
+      console.log(`Connection status: ${connectionStatus}`);
+      console.log(`Has remote stream: ${!!remoteStream}`);
       
     } catch (error) {
       console.error('❌ Debug error:', error);
@@ -253,11 +255,6 @@ const RoomPage = () => {
       if (isUserInRoom) {
         console.log('✅ User already in room, loading complete');
         setLoading(false);
-        
-        // Initialize signaling for peer connections
-        setTimeout(() => {
-          initializeUserSignaling?.();
-        }, 1000);
         return;
       }
 
@@ -326,12 +323,6 @@ const RoomPage = () => {
             console.log('❌ User still not in room after join attempt');
             setError('Failed to join room. Please try again.');
           }
-        } else {
-          // Success! Initialize signaling
-          console.log('✅ Successfully joined room, initializing signaling...');
-          setTimeout(() => {
-            initializeUserSignaling?.();
-          }, 1500);
         }
 
       } catch (joinError) {
@@ -345,11 +336,6 @@ const RoomPage = () => {
           console.log('✅ User actually joined despite error (race condition)');
           setParticipants(currentParticipants);
           setError('');
-          
-          // Initialize signaling
-          setTimeout(() => {
-            initializeUserSignaling?.();
-          }, 1500);
         } else if (joinError.message.includes('full')) {
           setError('Room is now full. Please try another room.');
         } else {
@@ -364,7 +350,7 @@ const RoomPage = () => {
       setLoading(false);
       console.log('=== LOAD ROOM END ===');
     }
-  }, [user, roomId, joinAttempted, setCurrentRoom, initializeUserSignaling]);
+  }, [user, roomId, joinAttempted, setCurrentRoom]);
 
   // Initial load on mount
   useEffect(() => {
@@ -376,8 +362,8 @@ const RoomPage = () => {
     loadRoom();
   }, [user, navigate, loadRoom]);
 
-  const leaveRoom = () => {
-    // We'll implement proper leaveRoom in next user story
+  const handleLeaveRoom = () => {
+    hangUp();
     navigate('/dashboard');
   };
 
@@ -416,70 +402,36 @@ const RoomPage = () => {
   };
 
   const checkWebRTCConnections = () => {
-  console.clear();
-  console.log('🔍 === WEBRTC CONNECTION DEBUG ===');
-  
-  // Check if we have peer connections
-  console.log('Peers object:', peers);
-  
-  Object.entries(peers).forEach(([peerId, peerData]) => {
-    console.log(`\n👤 Peer: ${peerId} (${peerData.userData?.name})`);
-    console.log('   Connection state:', peerData.connectionState);
+    console.clear();
+    console.log('🔍 === WEBRTC CONNECTION DEBUG ===');
+    console.log('Connection status:', connectionStatus);
+    console.log('Remote stream exists:', !!remoteStream);
     
-    if (peerData.stream) {
-      console.log('   Stream exists:', !!peerData.stream);
-      console.log('   Stream active:', peerData.stream.active);
-      console.log('   Stream id:', peerData.stream.id);
-      
-      const videoTracks = peerData.stream.getVideoTracks();
-      const audioTracks = peerData.stream.getAudioTracks();
-      
-      console.log('   Video tracks:', videoTracks.length);
-      console.log('   Audio tracks:', audioTracks.length);
-      
-      videoTracks.forEach((track, index) => {
-        console.log(`   Video track ${index}:`, {
-          enabled: track.enabled,
-          readyState: track.readyState,
-          muted: track.muted,
-          kind: track.kind,
-          label: track.label
-        });
-      });
-      
-      audioTracks.forEach((track, index) => {
-        console.log(`   Audio track ${index}:`, {
-          enabled: track.enabled,
-          readyState: track.readyState,
-          muted: track.muted,
-          kind: track.kind,
-          label: track.label
-        });
-      });
-    } else {
-      console.log('   ❌ No stream available');
+    if (remoteStream) {
+      console.log('Remote stream id:', remoteStream.id);
+      console.log('Remote stream active:', remoteStream.active);
+      console.log('Remote tracks:', remoteStream.getTracks().map(t => ({
+        kind: t.kind,
+        enabled: t.enabled,
+        muted: t.muted,
+        readyState: t.readyState
+      })));
     }
-  });
-  
-  // Check if we can access RTCPeerConnection
-  console.log('\n🌐 WebRTC Support:');
-  console.log('   RTCPeerConnection:', typeof RTCPeerConnection !== 'undefined' ? '✅ Available' : '❌ Not available');
-  console.log('   getUserMedia:', typeof navigator.mediaDevices?.getUserMedia !== 'undefined' ? '✅ Available' : '❌ Not available');
-  
-  // Check video elements
-  console.log('\n🎥 Video Elements:');
-  const videoElements = document.querySelectorAll('video');
-  videoElements.forEach((video, index) => {
-    console.log(`   Video ${index}:`, {
-      srcObject: video.srcObject,
-      readyState: video.readyState,
-      error: video.error,
-      paused: video.paused,
-      muted: video.muted,
-      isRemote: !video.muted
+    
+    // Check video elements
+    console.log('\n🎥 Video Elements:');
+    const videoElements = document.querySelectorAll('video');
+    videoElements.forEach((video, index) => {
+      console.log(`   Video ${index}:`, {
+        srcObject: video.srcObject,
+        readyState: video.readyState,
+        error: video.error,
+        paused: video.paused,
+        muted: video.muted,
+        isRemote: !video.muted
+      });
     });
-  });
-};
+  };
 
   if (loading) {
     return (
@@ -607,6 +559,14 @@ const RoomPage = () => {
               <span style={styles.roomStatus} data-status={room.status}>
                 {room.status}
               </span>
+              <span style={{
+                ...styles.connectionBadge,
+                backgroundColor: connectionStatus === 'connected' ? '#10b981' :
+                               connectionStatus === 'checking' ? '#f59e0b' :
+                               '#ef4444'
+              }}>
+                {connectionStatus}
+              </span>
               {!isUserInRoom && (
                 <span style={styles.warningBadge}>Not in room</span>
               )}
@@ -616,7 +576,7 @@ const RoomPage = () => {
 
         <div style={styles.headerRight}>
           <button
-            onClick={leaveRoom}
+            onClick={handleLeaveRoom}
             style={styles.leaveButton}
           >
             Leave Room
@@ -632,45 +592,29 @@ const RoomPage = () => {
             <LocalVideoPreview />
           </div>
 
-          {/* Remote Videos */}
-          {Object.entries(peers).map(([peerId, peerData]) => (
-            <div key={peerId} style={styles.videoContainer}>
-              <RemoteVideo
-                stream={peerData.stream}
-                userData={peerData.userData}
-                connectionState={peerData.connectionState}
-              />
-            </div>
-          ))}
+          {/* Remote Video */}
+          <div style={styles.videoContainer}>
+            <RemoteVideo />
+          </div>
 
-          {/* Show message if no connections yet */}
-          {Object.keys(peers).length === 0 && connectionStatus === 'connected' && (
+          {/* Show message if no remote connection */}
+          {!remoteStream && connectionStatus !== 'connected' && (
             <div style={styles.noConnectionsMessage}>
               <div style={styles.noConnectionsIcon}>👥</div>
-              <p style={styles.noConnectionsText}>Connected to room</p>
-              <p style={styles.noConnectionsSubtext}>
-                Waiting for other participants to join...
+              <p style={styles.noConnectionsText}>
+                {connectionStatus === 'checking' || connectionStatus === 'creating-offer' || connectionStatus === 'creating-answer' 
+                  ? 'Establishing connection...' 
+                  : 'Waiting for other participants...'}
               </p>
-              <p style={styles.inviteHint}>
+              <p style={styles.noConnectionsSubtext}>
                 Share room code: <strong>#{room?.roomCode}</strong>
               </p>
+              <div style={styles.connectionHint}>
+                <p>Status: <strong>{connectionStatus}</strong></p>
+                <p>Make sure both users have allowed camera/microphone permissions</p>
+              </div>
             </div>
           )}
-
-          {/* Connection Status */}
-          <div style={styles.connectionStatus}>
-            <div style={{
-              ...styles.statusIndicator,
-              backgroundColor: connectionStatus === 'connected' ? '#10b981' :
-                connectionStatus === 'connecting' ? '#f59e0b' :
-                  '#ef4444'
-            }}>
-              {connectionStatus.toUpperCase()}
-            </div>
-            <div style={styles.statusText}>
-              {activeConnections} connection{activeConnections !== 1 ? 's' : ''} active
-            </div>
-          </div>
         </div>
 
         {/* Participants Sidebar */}
@@ -795,32 +739,42 @@ const RoomPage = () => {
               </div>
             )}
 
-            {/* Peer connections status */}
-            <div style={styles.peersStatus}>
-              <div style={styles.peersStatusHeader}>
-                <span>Active Connections:</span>
+            {/* Connection status */}
+            <div style={styles.connectionInfo}>
+              <div style={styles.connectionInfoHeader}>
+                <span>Connection Status:</span>
                 <span style={{
-                  color: activeConnections > 0 ? '#10b981' : '#f59e0b',
+                  color: connectionStatus === 'connected' ? '#10b981' :
+                         connectionStatus === 'checking' ? '#f59e0b' :
+                         '#ef4444',
                   fontWeight: '600'
                 }}>
-                  {activeConnections}
+                  {connectionStatus}
                 </span>
               </div>
-              {Object.entries(peers).map(([peerId, peerData]) => (
-                <div key={peerId} style={styles.peerItem}>
-                  <span style={styles.peerName}>
-                    {peerData.userData?.name || 'Peer'}
-                  </span>
-                  <span style={{
-                    ...styles.peerStatus,
-                    color: peerData.connectionState === 'connected' ? '#10b981' :
-                           peerData.connectionState === 'connecting' ? '#f59e0b' :
-                           '#ef4444'
-                  }}>
-                    {peerData.connectionState || 'unknown'}
+              <div style={styles.connectionDetails}>
+                <div style={styles.connectionDetail}>
+                  <span>Local Stream:</span>
+                  <span style={{color: localStream ? '#10b981' : '#ef4444'}}>
+                    {localStream ? 'Active' : 'Inactive'}
                   </span>
                 </div>
-              ))}
+                <div style={styles.connectionDetail}>
+                  <span>Remote Stream:</span>
+                  <span style={{color: remoteStream ? '#10b981' : '#ef4444'}}>
+                    {remoteStream ? 'Active' : 'Inactive'}
+                  </span>
+                </div>
+                {remoteStream && (
+                  <div style={styles.trackInfo}>
+                    <span>Tracks:</span>
+                    <span>
+                      Video: {remoteStream.getVideoTracks().length}, 
+                      Audio: {remoteStream.getAudioTracks().length}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </aside>
@@ -829,7 +783,6 @@ const RoomPage = () => {
       {/* Debug Panel */}
       <details style={styles.debugPanel}>
         <summary style={styles.debugSummary}>🔧 Debug Panel</summary>
-        <ConnectionDebug />
         <div style={styles.debugActions}>
           <button 
             onClick={debugFirestoreStructure}
@@ -844,10 +797,16 @@ const RoomPage = () => {
             Check Room State
           </button>
           <button 
-            onClick={() => console.log('Peers:', peers)}
+            onClick={checkWebRTCConnections}
             style={styles.debugButton}
           >
-            Log Peers
+            Check WebRTC
+          </button>
+          <button 
+            onClick={() => console.log('Remote stream:', remoteStream)}
+            style={styles.debugButton}
+          >
+            Log Remote Stream
           </button>
           <button 
             onClick={refreshRoomData}
@@ -855,83 +814,8 @@ const RoomPage = () => {
           >
             Refresh Data
           </button>
-          {room?.hostId === user?.uid && participants.length > 1 && (
-            <button 
-              onClick={() => {
-                const otherParticipant = participants.find(p => p.id !== user?.uid);
-                if (otherParticipant) {
-                  console.log('Manual connect to:', otherParticipant);
-                  connectToUser(otherParticipant.id, {
-                    name: otherParticipant.name,
-                    photoURL: otherParticipant.photoURL
-                  });
-                }
-              }}
-              style={styles.debugButton}
-            >
-              🔗 Manual Connect
-            </button>
-          )}
         </div>
       </details>
-
-      <button
-        style={styles.controlButton}
-        onClick={checkWebRTCConnections}
-      >
-        🔍 Debug WebRTC
-      </button>
-
-      <button
-  style={styles.controlButton}
-  onClick={() => {
-    // Create a test video stream
-    const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 480;
-    const ctx = canvas.getContext('2d');
-    
-    // Draw test pattern
-    const gradient = ctx.createLinearGradient(0, 0, 640, 480);
-    gradient.addColorStop(0, '#8b5cf6');
-    gradient.addColorStop(1, '#3b82f6');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, 640, 480);
-    
-    // Add text
-    ctx.fillStyle = 'white';
-    ctx.font = 'bold 30px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('TEST VIDEO', 320, 200);
-    ctx.font = '20px Arial';
-    ctx.fillText('Remote Stream Test', 320, 240);
-    ctx.fillText(new Date().toLocaleTimeString(), 320, 280);
-    
-    // Create stream
-    const testStream = canvas.captureStream(30);
-    const videoTrack = testStream.getVideoTracks()[0];
-    videoTrack.enabled = true;
-    
-    console.log('🎬 Created test stream:', testStream);
-    console.log('   Video track:', videoTrack);
-    
-    // If we have peers, update the first one with test stream
-    if (Object.keys(peers).length > 0) {
-      const firstPeerId = Object.keys(peers)[0];
-      console.log(`Adding test stream to peer: ${firstPeerId}`);
-      
-      setPeers(prev => ({
-        ...prev,
-        [firstPeerId]: {
-          ...prev[firstPeerId],
-          stream: testStream
-        }
-      }));
-    }
-  }}
->
-  🎬 Test Video
-</button>
 
       {/* Room Status Footer */}
       <footer style={styles.footer}>
@@ -943,7 +827,8 @@ const RoomPage = () => {
             <span style={styles.footerSeparator}>•</span>
             <span style={{
               color: connectionStatus === 'connected' ? '#10b981' :
-                     connectionStatus === 'connecting' ? '#f59e0b' : '#ef4444'
+                     connectionStatus === 'checking' ? '#f59e0b' : 
+                     '#ef4444'
             }}>
               {connectionStatus.toUpperCase()}
             </span>
@@ -1183,6 +1068,14 @@ const styles = {
     fontWeight: '500',
     textTransform: 'capitalize'
   },
+  connectionBadge: {
+    padding: '4px 8px',
+    borderRadius: '4px',
+    color: 'white',
+    fontWeight: '500',
+    fontSize: '0.8rem',
+    textTransform: 'capitalize'
+  },
   warningBadge: {
     padding: '4px 8px',
     backgroundColor: 'rgba(239, 68, 68, 0.2)',
@@ -1214,8 +1107,8 @@ const styles = {
   },
   videoSection: {
     flex: 3,
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+    display: 'flex',
+    flexWrap: 'wrap',
     gap: '15px',
     backgroundColor: 'var(--bg-card-light)',
     borderRadius: 'var(--radius-lg)',
@@ -1223,15 +1116,18 @@ const styles = {
     padding: '15px',
     minHeight: '500px',
     overflowY: 'auto',
-    position: 'relative'
+    position: 'relative',
+    justifyContent: 'center',
+    alignItems: 'center'
   },
   videoContainer: {
     position: 'relative',
     backgroundColor: '#000',
     borderRadius: 'var(--radius-md)',
     overflow: 'hidden',
+    width: '48%',
+    minWidth: '300px',
     aspectRatio: '16/9',
-    minHeight: '250px',
     border: '2px solid var(--border-light)'
   },
   noConnectionsMessage: {
@@ -1245,7 +1141,8 @@ const styles = {
     borderRadius: 'var(--radius-lg)',
     backdropFilter: 'blur(10px)',
     border: '1px solid var(--border-light)',
-    zIndex: 10
+    zIndex: 10,
+    maxWidth: '400px'
   },
   noConnectionsIcon: {
     fontSize: '3rem',
@@ -1262,40 +1159,12 @@ const styles = {
     marginBottom: '15px',
     fontSize: '1rem'
   },
-  inviteHint: {
-    color: '#a78bfa',
-    fontSize: '0.9rem',
-    backgroundColor: 'rgba(124, 58, 237, 0.1)',
-    padding: '8px 12px',
+  connectionHint: {
+    marginTop: '20px',
+    padding: '15px',
+    backgroundColor: 'rgba(59, 130, 246, 0.1)',
     borderRadius: 'var(--radius-md)',
-    display: 'inline-block'
-  },
-  connectionStatus: {
-    position: 'absolute',
-    bottom: '20px',
-    right: '20px',
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-    color: 'white',
-    padding: '8px 12px',
-    borderRadius: 'var(--radius-md)',
-    fontSize: '0.9rem',
-    zIndex: 100,
-    display: 'flex',
-    alignItems: 'center',
-    gap: '10px',
-    backdropFilter: 'blur(10px)'
-  },
-  statusIndicator: {
-    padding: '4px 8px',
-    borderRadius: '12px',
-    color: 'white',
-    fontWeight: '600',
-    fontSize: '0.8rem',
-    textTransform: 'uppercase'
-  },
-  statusText: {
-    fontSize: '0.8rem',
-    opacity: 0.9
+    fontSize: '0.9rem'
   },
   sidebar: {
     flex: 1,
@@ -1505,32 +1374,34 @@ const styles = {
     color: '#fbbf24',
     fontSize: '0.8rem'
   },
-  peersStatus: {
+  connectionInfo: {
     marginTop: '20px',
     padding: '15px',
     backgroundColor: 'rgba(0, 0, 0, 0.2)',
     borderRadius: 'var(--radius-md)'
   },
-  peersStatusHeader: {
+  connectionInfoHeader: {
     display: 'flex',
     justifyContent: 'space-between',
     marginBottom: '10px',
     fontSize: '0.9rem'
   },
-  peerItem: {
+  connectionDetails: {
     display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: '6px 0',
+    flexDirection: 'column',
+    gap: '8px',
     fontSize: '0.8rem'
   },
-  peerName: {
-    color: 'var(--text-gray)'
+  connectionDetail: {
+    display: 'flex',
+    justifyContent: 'space-between'
   },
-  peerStatus: {
-    fontWeight: '500',
-    fontSize: '0.75rem',
-    textTransform: 'uppercase'
+  trackInfo: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    fontSize: '0.7rem',
+    color: 'var(--text-gray)',
+    marginTop: '5px'
   },
   debugPanel: {
     margin: '20px',

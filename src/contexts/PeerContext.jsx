@@ -1,15 +1,17 @@
-// contexts/PeerContext.jsx - UPDATED VERSION
+// contexts/PeerContext.jsx - SIMPLIFIED VERSION
 import React, { createContext, useContext, useRef, useCallback, useEffect, useState } from 'react';
 import { useAuth } from './AuthContext';
 import { useMedia } from './MediaContext';
 import { useRoom } from './RoomContext';
 import { 
-  collection, 
   doc, 
   setDoc, 
   getDoc,
   deleteDoc,
   onSnapshot,
+  collection,
+  addDoc,
+  updateDoc,
   serverTimestamp 
 } from 'firebase/firestore';
 import { db } from '../firebase';
@@ -29,680 +31,369 @@ export const PeerProvider = ({ children }) => {
   const { localStream } = useMedia();
   const { currentRoom } = useRoom();
   
-  const [peers, setPeers] = useState({});
-  const [connectionStatus, setConnectionStatus] = useState('idle');
-  const [activeConnections, setActiveConnections] = useState(0);
+  const [remoteStream, setRemoteStream] = useState(null);
+  const [remoteUser, setRemoteUser] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState('disconnected');
   
-  const peerConnectionsRef = useRef({});
+  const peerConnectionRef = useRef(null);
   const localStreamRef = useRef(null);
-  const cleanupFunctionsRef = useRef([]);
+  const isCallerRef = useRef(false);
+  const roomIdRef = useRef(null);
 
-  // STUN servers configuration
+  // STUN servers
   const iceServers = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      { 
-        urls: 'turn:openrelay.metered.ca:80',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      },
-      { 
-        urls: 'turn:openrelay.metered.ca:443',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      }
+      { urls: 'stun:stun3.l.google.com:19302' }
     ]
   };
 
-  // Cleanup function
-  const cleanup = useCallback(() => {
-    console.log('🧹 Cleaning up peer connections');
+  // Create peer connection
+  const createPeerConnection = useCallback(() => {
+    console.log('🔗 Creating new peer connection');
     
-    Object.values(peerConnectionsRef.current).forEach(pc => {
-      if (pc && pc.signalingState !== 'closed') {
-        pc.close();
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+    }
+    
+    const pc = new RTCPeerConnection(iceServers);
+    peerConnectionRef.current = pc;
+    
+    // Add local tracks
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        console.log(`🎤 Adding local ${track.kind} track to PC`);
+        pc.addTrack(track, localStreamRef.current);
+      });
+    }
+    
+    // Handle remote tracks
+    const remoteStream = new MediaStream();
+    setRemoteStream(remoteStream);
+    
+    pc.ontrack = (event) => {
+      console.log('📹 Received remote track:', event.track.kind);
+      remoteStream.addTrack(event.track);
+      setRemoteStream(new MediaStream(remoteStream.getTracks()));
+    };
+    
+    // ICE candidate handler
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        console.log('🧊 Generated ICE candidate');
+        sendIceCandidate(event.candidate);
       }
-    });
+    };
     
-    peerConnectionsRef.current = {};
+    // Connection state
+    pc.oniceconnectionstatechange = () => {
+      console.log('🧊 ICE connection state:', pc.iceConnectionState);
+      setConnectionStatus(pc.iceConnectionState);
+    };
     
-    cleanupFunctionsRef.current.forEach(fn => fn());
-    cleanupFunctionsRef.current = [];
+    pc.onsignalingstatechange = () => {
+      console.log('📡 Signaling state:', pc.signalingState);
+    };
     
-    setPeers({});
-    setConnectionStatus('idle');
-    setActiveConnections(0);
+    pc.onconnectionstatechange = () => {
+      console.log('🔌 Connection state:', pc.connectionState);
+    };
     
-    console.log('✅ Peer cleanup complete');
+    return pc;
   }, []);
 
-  // Initialize signaling for a room
-  const initializeSignaling = useCallback(async (roomId) => {
-    if (!user || !roomId) return;
-    
-    console.log('📡 Initializing signaling for room:', roomId);
+  // Send ICE candidate to Firestore
+  const sendIceCandidate = useCallback(async (candidate) => {
+    if (!roomIdRef.current || !user) return;
     
     try {
-      const signalingDocRef = doc(db, 'rooms', roomId, 'signaling', user.uid);
+      const collectionName = isCallerRef.current ? 'offerCandidates' : 'answerCandidates';
+      const candidatesRef = collection(db, 'rooms', roomIdRef.current, collectionName);
       
-      await setDoc(signalingDocRef, {
-        userId: user.uid,
-        userName: user.displayName,
-        isOnline: true,
-        lastSeen: serverTimestamp(),
-        status: 'online',
-        readyForConnection: true
-      }, { merge: true });
-      
-      console.log('✅ Signaling document created/updated for user:', user.uid);
-      
-    } catch (error) {
-      console.error('❌ Error creating signaling document:', error);
-    }
-  }, [user]);
-
-  // Create a peer connection with proper event handlers
-  const createPeerConnection = useCallback((remoteUserId, remoteUserData) => {
-    console.log('🔗 Creating peer connection to:', remoteUserId);
-    
-    try {
-      const pc = new RTCPeerConnection(iceServers);
-      peerConnectionsRef.current[remoteUserId] = pc;
-      
-      // Add local stream tracks if available
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => {
-          pc.addTrack(track, localStreamRef.current);
-        });
-      }
-      
-      // Handle remote stream
-      pc.ontrack = (event) => {
-        console.log('📹 Received remote track from:', remoteUserId);
-        
-        const remoteStream = event.streams[0];
-        if (remoteStream) {
-          setPeers(prev => ({
-            ...prev,
-            [remoteUserId]: {
-              ...prev[remoteUserId],
-              stream: remoteStream,
-              connectionState: pc.connectionState || 'connected',
-              userData: remoteUserData
-            }
-          }));
-        }
-      };
-      
-      // ICE candidate handler
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          console.log('🧊 New ICE candidate for:', remoteUserId);
-          sendICECandidate(remoteUserId, event.candidate);
-        }
-      };
-      
-      // ICE gathering state
-      pc.onicegatheringstatechange = () => {
-        console.log(`🧊 ICE gathering state for ${remoteUserId}:`, pc.iceGatheringState);
-      };
-      
-      // Connection state changes
-      pc.onconnectionstatechange = () => {
-        console.log(`🔌 Connection state with ${remoteUserId}:`, pc.connectionState);
-        
-        setPeers(prev => ({
-          ...prev,
-          [remoteUserId]: {
-            ...prev[remoteUserId],
-            connectionState: pc.connectionState
-          }
-        }));
-        
-        if (pc.connectionState === 'connected') {
-          console.log(`✅ Connected to ${remoteUserId}`);
-          setConnectionStatus('connected');
-        } else if (pc.connectionState === 'disconnected' || 
-                   pc.connectionState === 'failed' || 
-                   pc.connectionState === 'closed') {
-          console.log(`❌ Connection lost with ${remoteUserId}`);
-          
-          if (peerConnectionsRef.current[remoteUserId]) {
-            peerConnectionsRef.current[remoteUserId].close();
-            delete peerConnectionsRef.current[remoteUserId];
-          }
-          
-          setPeers(prev => {
-            const newPeers = { ...prev };
-            delete newPeers[remoteUserId];
-            return newPeers;
-          });
-        }
-      };
-      
-      // ICE connection state
-      pc.oniceconnectionstatechange = () => {
-        console.log(`🧊 ICE connection state with ${remoteUserId}:`, pc.iceConnectionState);
-        
-        if (pc.iceConnectionState === 'failed') {
-          console.log(`❌ ICE connection failed for ${remoteUserId}, restarting ICE`);
-          // Try to restart ICE
-          setTimeout(() => {
-            if (pc.iceConnectionState === 'failed') {
-              pc.restartIce();
-            }
-          }, 1000);
-        }
-      };
-      
-      // Signaling state
-      pc.onsignalingstatechange = () => {
-        console.log(`📡 Signaling state with ${remoteUserId}:`, pc.signalingState);
-      };
-      
-      console.log('✅ Peer connection created for:', remoteUserId);
-      return pc;
-      
-    } catch (error) {
-      console.error('❌ Error creating peer connection:', error);
-      return null;
-    }
-  }, []);
-
-  // Send ICE candidate
-  const sendICECandidate = useCallback(async (remoteUserId, candidate) => {
-    if (!currentRoom?.id || !user) return;
-    
-    try {
-      const candidateDocRef = doc(
-        db, 
-        'rooms', 
-        currentRoom.id, 
-        'signaling', 
-        remoteUserId,
-        'candidates',
-        `${Date.now()}_${user.uid}`
-      );
-      
-      await setDoc(candidateDocRef, {
-        to: remoteUserId,
-        from: user.uid,
-        candidate: JSON.stringify(candidate.toJSON()),
-        timestamp: serverTimestamp(),
-        type: 'candidate'
+      await addDoc(candidatesRef, {
+        candidate: candidate.toJSON(),
+        senderId: user.uid,
+        senderName: user.displayName,
+        timestamp: serverTimestamp()
       });
       
-      console.log('✅ ICE candidate sent to:', remoteUserId);
+      console.log('✅ ICE candidate sent');
     } catch (error) {
       console.error('❌ Error sending ICE candidate:', error);
     }
-  }, [currentRoom?.id, user]);
+  }, [user]);
 
-  // Send SDP offer
-  const sendOffer = useCallback(async (remoteUserId, offer) => {
+  // Create offer (caller)
+  const createOffer = useCallback(async () => {
     if (!currentRoom?.id || !user) return;
     
-    console.log('📤 Sending offer to user:', remoteUserId);
+    console.log('📤 Creating offer as caller');
+    isCallerRef.current = true;
+    roomIdRef.current = currentRoom.id;
+    
+    const pc = createPeerConnection();
+    setConnectionStatus('creating-offer');
     
     try {
-      const offerDocRef = doc(
-        db,
-        'rooms',
-        currentRoom.id,
-        'signaling',
-        remoteUserId,
-        'offers',
-        `${Date.now()}_${user.uid}`
-      );
-      
-      await setDoc(offerDocRef, {
-        sdp: JSON.stringify(offer),
-        from: user.uid,
-        fromName: user.displayName,
-        to: remoteUserId,
-        timestamp: serverTimestamp(),
-        type: 'offer'
-      });
-      
-      console.log('✅ Offer saved to Firestore at path:', offerDocRef.path);
-      
-    } catch (error) {
-      console.error('❌ Error sending offer:', error);
-    }
-  }, [currentRoom?.id, user]);
-
-  // Send SDP answer
-  const sendAnswer = useCallback(async (remoteUserId, answer) => {
-    if (!currentRoom?.id || !user) return;
-    
-    console.log('📤 Sending answer to user:', remoteUserId);
-    
-    try {
-      const answerDocRef = doc(
-        db,
-        'rooms',
-        currentRoom.id,
-        'signaling',
-        remoteUserId,
-        'answers',
-        `${Date.now()}_${user.uid}`
-      );
-      
-      await setDoc(answerDocRef, {
-        sdp: JSON.stringify(answer),
-        from: user.uid,
-        fromName: user.displayName,
-        to: remoteUserId,
-        timestamp: serverTimestamp(),
-        type: 'answer'
-      });
-      
-      console.log('✅ Answer saved to Firestore at path:', answerDocRef.path);
-      
-    } catch (error) {
-      console.error('❌ Error sending answer:', error);
-    }
-  }, [currentRoom?.id, user]);
-
-  // Handle incoming offer - FIXED VERSION
-  const handleIncomingOffer = useCallback(async (remoteUserId, offer) => {
-    console.log('🎯 handleIncomingOffer called for:', remoteUserId);
-    console.log('   Offer type:', offer?.type);
-    
-    try {
-      let pc = peerConnectionsRef.current[remoteUserId];
-      if (!pc) {
-        console.log('   Creating new peer connection...');
-        const remoteUserData = { 
-          id: remoteUserId, 
-          name: offer.fromName || 'Remote User' 
-        };
-        pc = createPeerConnection(remoteUserId, remoteUserData);
-        if (!pc) {
-          console.error('   ❌ Failed to create peer connection');
-          return;
-        }
-      }
-      
-      console.log('   Setting remote description...');
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
-      console.log('   ✅ Remote description set');
-      
-      console.log('   Creating answer...');
-      const answer = await pc.createAnswer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: true
-      });
-      console.log('   Answer created:', answer.type);
-      
-      console.log('   Setting local description...');
-      await pc.setLocalDescription(answer);
-      console.log('   ✅ Local description set');
-      
-      console.log('   Sending answer to:', remoteUserId);
-      await sendAnswer(remoteUserId, answer);
-      console.log('   ✅ Answer sent');
-      
-      // Set up initial peer state
-      setPeers(prev => ({
-        ...prev,
-        [remoteUserId]: {
-          ...prev[remoteUserId],
-          connectionState: pc.connectionState,
-          userData: { id: remoteUserId, name: offer.fromName || 'Remote User' }
-        }
-      }));
-      
-    } catch (error) {
-      console.error('❌ Error in handleIncomingOffer:', error);
-    }
-  }, [createPeerConnection, sendAnswer]);
-
-  // Handle incoming answer
-  const handleIncomingAnswer = useCallback(async (remoteUserId, answer) => {
-    console.log('🎯 Handling incoming answer from:', remoteUserId);
-    
-    const pc = peerConnectionsRef.current[remoteUserId];
-    if (!pc) {
-      console.error('❌ No peer connection found for:', remoteUserId);
-      return;
-    }
-    
-    try {
-      const remoteDesc = new RTCSessionDescription(answer);
-      await pc.setRemoteDescription(remoteDesc);
-      console.log('✅ Remote description set for:', remoteUserId);
-    } catch (error) {
-      console.error('❌ Error setting remote description:', error);
-    }
-  }, []);
-
-  // Handle incoming ICE candidate
-  const handleIncomingICECandidate = useCallback(async (remoteUserId, candidate) => {
-    console.log('🧊 Handling incoming ICE candidate from:', remoteUserId);
-    
-    const pc = peerConnectionsRef.current[remoteUserId];
-    if (!pc) {
-      console.error('❌ No peer connection found for ICE candidate:', remoteUserId);
-      return;
-    }
-    
-    try {
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      console.log('✅ ICE candidate added for:', remoteUserId);
-    } catch (error) {
-      console.error('❌ Error adding ICE candidate:', error);
-    }
-  }, []);
-
-  // Connect to a specific user
-  const connectToUser = useCallback(async (remoteUserId, remoteUserData) => {
-    if (!user || user.uid === remoteUserId) return;
-    
-    console.log('🤝 Connecting to user:', remoteUserId);
-    setConnectionStatus('connecting');
-    
-    // Check if already connected
-    if (peerConnectionsRef.current[remoteUserId]) {
-      console.log('⚠️ Already connected to:', remoteUserId);
-      return;
-    }
-    
-    try {
-      const pc = createPeerConnection(remoteUserId, remoteUserData);
-      if (!pc) {
-        throw new Error('Failed to create peer connection');
-      }
-      
       // Create offer
-      const offer = await pc.createOffer({
+      const offerDescription = await pc.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true
       });
+      await pc.setLocalDescription(offerDescription);
+      console.log('✅ Offer created:', offerDescription.type);
       
-      await pc.setLocalDescription(offer);
-      await sendOffer(remoteUserId, offer);
+      // Save offer to Firestore
+      const roomRef = doc(db, 'rooms', currentRoom.id);
+      await setDoc(roomRef, {
+        offer: {
+          sdp: offerDescription.sdp,
+          type: offerDescription.type
+        },
+        callerId: user.uid,
+        callerName: user.displayName,
+        createdAt: serverTimestamp()
+      }, { merge: true });
       
-      console.log('✅ Offer created and sent to:', remoteUserId);
+      console.log('✅ Offer saved to Firestore');
       
-      // Set initial peer state
-      setPeers(prev => ({
-        ...prev,
-        [remoteUserId]: {
-          connectionState: 'connecting',
-          userData: remoteUserData
+      // Listen for answer
+      const unsubscribe = onSnapshot(roomRef, async (snapshot) => {
+        if (!snapshot.exists()) return;
+        
+        const data = snapshot.data();
+        if (data.answer && !pc.currentRemoteDescription) {
+          console.log('📩 Received answer from remote peer');
+          const answerDescription = new RTCSessionDescription(data.answer);
+          await pc.setRemoteDescription(answerDescription);
+          console.log('✅ Remote description set');
         }
-      }));
+      });
+      
+      // Listen for answer candidates
+      const answerCandidatesRef = collection(db, 'rooms', currentRoom.id, 'answerCandidates');
+      const candidatesUnsubscribe = onSnapshot(answerCandidatesRef, (snapshot) => {
+        snapshot.docChanges().forEach(async (change) => {
+          if (change.type === 'added') {
+            const data = change.doc.data();
+            console.log('🧊 Received answer candidate');
+            
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+              
+              // Get remote user info
+              if (data.senderId !== user.uid) {
+                setRemoteUser({
+                  id: data.senderId,
+                  name: data.senderName
+                });
+              }
+              
+              // Clean up candidate
+              await deleteDoc(change.doc.ref);
+            } catch (error) {
+              console.error('Error adding answer candidate:', error);
+            }
+          }
+        });
+      });
+      
+      return () => {
+        unsubscribe();
+        candidatesUnsubscribe();
+      };
       
     } catch (error) {
-      console.error('❌ Error connecting to user:', error);
+      console.error('❌ Error creating offer:', error);
       setConnectionStatus('error');
     }
-  }, [user, createPeerConnection, sendOffer]);
+  }, [currentRoom?.id, user, createPeerConnection]);
 
-  // ========== USE EFFECTS ==========
-
-  // Keep localStreamRef updated
-  useEffect(() => {
-    localStreamRef.current = localStream;
-  }, [localStream]);
-
-  // Initialize signaling when room is ready
-  useEffect(() => {
-    if (currentRoom?.id && user) {
-      console.log('📡 Initializing signaling for room:', currentRoom.id);
-      initializeSignaling(currentRoom.id);
+  // Create answer (callee)
+  const createAnswer = useCallback(async () => {
+    if (!currentRoom?.id || !user) return;
+    
+    console.log('📤 Creating answer as callee');
+    isCallerRef.current = false;
+    roomIdRef.current = currentRoom.id;
+    
+    const pc = createPeerConnection();
+    setConnectionStatus('creating-answer');
+    
+    try {
+      const roomRef = doc(db, 'rooms', currentRoom.id);
+      const roomSnap = await getDoc(roomRef);
+      
+      if (!roomSnap.exists()) {
+        throw new Error('Room not found');
+      }
+      
+      const roomData = roomSnap.data();
+      if (!roomData.offer) {
+        throw new Error('No offer found in room');
+      }
+      
+      console.log('📩 Received offer from caller:', roomData.callerName);
+      setRemoteUser({
+        id: roomData.callerId,
+        name: roomData.callerName
+      });
+      
+      // Set remote description
+      const offerDescription = new RTCSessionDescription(roomData.offer);
+      await pc.setRemoteDescription(offerDescription);
+      console.log('✅ Remote description set');
+      
+      // Create answer
+      const answerDescription = await pc.createAnswer();
+      await pc.setLocalDescription(answerDescription);
+      console.log('✅ Answer created');
+      
+      // Save answer to Firestore
+      await updateDoc(roomRef, {
+        answer: {
+          sdp: answerDescription.sdp,
+          type: answerDescription.type
+        },
+        calleeId: user.uid,
+        calleeName: user.displayName,
+        answeredAt: serverTimestamp()
+      });
+      
+      console.log('✅ Answer saved to Firestore');
+      
+      // Listen for offer candidates
+      const offerCandidatesRef = collection(db, 'rooms', currentRoom.id, 'offerCandidates');
+      const candidatesUnsubscribe = onSnapshot(offerCandidatesRef, (snapshot) => {
+        snapshot.docChanges().forEach(async (change) => {
+          if (change.type === 'added') {
+            const data = change.doc.data();
+            console.log('🧊 Received offer candidate');
+            
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+              
+              // Clean up candidate
+              await deleteDoc(change.doc.ref);
+            } catch (error) {
+              console.error('Error adding offer candidate:', error);
+            }
+          }
+        });
+      });
+      
+      return () => {
+        candidatesUnsubscribe();
+      };
+      
+    } catch (error) {
+      console.error('❌ Error creating answer:', error);
+      setConnectionStatus('error');
     }
-  }, [currentRoom?.id, user, initializeSignaling]);
+  }, [currentRoom?.id, user, createPeerConnection]);
 
-  // Cleanup on unmount
+  // Clean up
+  const cleanup = useCallback(() => {
+    console.log('🧹 Cleaning up peer connection');
+    
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+    
+    setRemoteStream(null);
+    setRemoteUser(null);
+    setConnectionStatus('disconnected');
+    isCallerRef.current = false;
+    roomIdRef.current = null;
+  }, []);
+
+  // Hang up call
+  const hangUp = useCallback(async () => {
+    cleanup();
+    
+    if (currentRoom?.id) {
+      try {
+        // Clean up Firestore data
+        const roomRef = doc(db, 'rooms', currentRoom.id);
+        
+        // Delete candidates collections
+        const offerCandidatesRef = collection(db, 'rooms', currentRoom.id, 'offerCandidates');
+        const offerSnapshot = await getDocs(offerCandidatesRef);
+        offerSnapshot.docs.forEach(async (doc) => {
+          await deleteDoc(doc.ref);
+        });
+        
+        const answerCandidatesRef = collection(db, 'rooms', currentRoom.id, 'answerCandidates');
+        const answerSnapshot = await getDocs(answerCandidatesRef);
+        answerSnapshot.docs.forEach(async (doc) => {
+          await deleteDoc(doc.ref);
+        });
+        
+        // Clear offer/answer from room document
+        await updateDoc(roomRef, {
+          offer: null,
+          answer: null,
+          callerId: null,
+          calleeId: null
+        });
+        
+        console.log('✅ Call data cleaned up');
+      } catch (error) {
+        console.error('Error cleaning up call data:', error);
+      }
+    }
+  }, [currentRoom?.id, cleanup]);
+
+  // Initialize call based on role
+  useEffect(() => {
+    if (!currentRoom?.id || !user || !localStream) return;
+    
+    console.log('🚀 Initializing call for room:', currentRoom.id);
+    console.log('User:', user.uid, user.displayName);
+    console.log('Room host:', currentRoom.hostId);
+    
+    // Update local stream reference
+    localStreamRef.current = localStream;
+    
+    // Determine if user is the host (caller) or joiner (callee)
+    const isHost = currentRoom.hostId === user.uid;
+    console.log(`User is ${isHost ? 'host (caller)' : 'joiner (callee)'}`);
+    
+    // Wait a bit for other participant
+    const timer = setTimeout(() => {
+      if (isHost) {
+        console.log('🎯 Host will create offer');
+        createOffer();
+      } else {
+        console.log('🎯 Joiner will create answer');
+        createAnswer();
+      }
+    }, 2000);
+    
+    return () => {
+      clearTimeout(timer);
+      hangUp();
+    };
+  }, [currentRoom?.id, user, localStream, createOffer, createAnswer, hangUp]);
+
+  // Clean up on unmount
   useEffect(() => {
     return () => {
       cleanup();
     };
   }, [cleanup]);
 
-  // Offer listener
-  useEffect(() => {
-    if (!currentRoom?.id || !user) return;
-    
-    console.log('👂 Setting up offer listener for user:', user.uid);
-    
-    const offersRef = collection(
-      db, 
-      'rooms', 
-      currentRoom.id, 
-      'signaling', 
-      user.uid,
-      'offers'
-    );
-    
-    const offersUnsubscribe = onSnapshot(offersRef, 
-      (snapshot) => {
-        snapshot.docChanges().forEach(async (change) => {
-          if (change.type === 'added') {
-            const offerData = change.doc.data();
-            console.log('📨 NEW OFFER RECEIVED from:', offerData.from);
-            
-            try {
-              const offer = JSON.parse(offerData.sdp);
-              await handleIncomingOffer(offerData.from, offer);
-              
-              // Clean up the offer document
-              await deleteDoc(change.doc.ref);
-              console.log('✅ Offer processed and cleaned up');
-              
-            } catch (error) {
-              console.error('❌ Error processing offer:', error);
-            }
-          }
-        });
-      },
-      (error) => {
-        console.error('❌ Error in offer listener:', error);
-      }
-    );
-    
-    cleanupFunctionsRef.current.push(offersUnsubscribe);
-    
-    return () => {
-      offersUnsubscribe();
-    };
-  }, [currentRoom?.id, user, handleIncomingOffer]);
-
-  // Answer listener
-  useEffect(() => {
-    if (!currentRoom?.id || !user) return;
-    
-    console.log('👂 Setting up answer listener');
-    
-    const answersRef = collection(
-      db, 
-      'rooms', 
-      currentRoom.id, 
-      'signaling', 
-      user.uid,
-      'answers'
-    );
-    
-    const answersUnsubscribe = onSnapshot(answersRef, (snapshot) => {
-      snapshot.docChanges().forEach(async (change) => {
-        if (change.type === 'added') {
-          const answerData = change.doc.data();
-          console.log('📨 Received answer from:', answerData.from);
-          
-          try {
-            await handleIncomingAnswer(answerData.from, JSON.parse(answerData.sdp));
-            await deleteDoc(change.doc.ref);
-          } catch (error) {
-            console.error('❌ Error processing answer:', error);
-          }
-        }
-      });
-    });
-    
-    cleanupFunctionsRef.current.push(answersUnsubscribe);
-    
-    return () => {
-      answersUnsubscribe();
-    };
-  }, [currentRoom?.id, user, handleIncomingAnswer]);
-
-  // ICE candidate listener
-  useEffect(() => {
-    if (!currentRoom?.id || !user) return;
-    
-    console.log('👂 Setting up ICE candidate listener');
-    
-    const candidatesRef = collection(
-      db, 
-      'rooms', 
-      currentRoom.id, 
-      'signaling', 
-      user.uid,
-      'candidates'
-    );
-    
-    const candidatesUnsubscribe = onSnapshot(candidatesRef, (snapshot) => {
-      snapshot.docChanges().forEach(async (change) => {
-        if (change.type === 'added') {
-          const candidateData = change.doc.data();
-          console.log('🧊 Received ICE candidate from:', candidateData.from);
-          
-          try {
-            await handleIncomingICECandidate(
-              candidateData.from, 
-              JSON.parse(candidateData.candidate)
-            );
-            await deleteDoc(change.doc.ref);
-          } catch (error) {
-            console.error('❌ Error processing ICE candidate:', error);
-          }
-        }
-      });
-    });
-    
-    cleanupFunctionsRef.current.push(candidatesUnsubscribe);
-    
-    return () => {
-      candidatesUnsubscribe();
-    };
-  }, [currentRoom?.id, user, handleIncomingICECandidate]);
-
-  // Participants listener - UPDATED to handle both host and joiner logic
-  useEffect(() => {
-  if (!currentRoom?.id || !user) return;
-  
-  console.log('👥 HOST/JOINER - Setting up participants listener');
-  console.log('   My ID:', user.uid);
-  console.log('   Room Host ID:', currentRoom.hostId);
-  console.log('   Am I host?', currentRoom.hostId === user.uid);
-  
-  const participantsRef = collection(db, 'rooms', currentRoom.id, 'participants');
-  
-  const unsubscribe = onSnapshot(participantsRef, (snapshot) => {
-    const participants = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    }));
-    
-    console.log('📊 Current participants:', participants.map(p => `${p.name} (${p.id})`));
-    
-    // Filter out self
-    const otherParticipants = participants.filter(p => p.id !== user.uid);
-    console.log('   Other participants:', otherParticipants.length);
-    
-    // If I'm the HOST
-    if (currentRoom.hostId === user.uid) {
-      console.log(`👑 I AM THE HOST - connecting to ${otherParticipants.length} other participants`);
-      
-      otherParticipants.forEach(participant => {
-        // Check if we already have a connection
-        if (!peerConnectionsRef.current[participant.id]) {
-          console.log(`   🟡 Creating connection to: ${participant.name} (${participant.id})`);
-          
-          // Delay to avoid race conditions
-          setTimeout(() => {
-            connectToUser(participant.id, {
-              name: participant.name,
-              photoURL: participant.photoURL
-            });
-          }, 1000);
-        } else {
-          const pc = peerConnectionsRef.current[participant.id];
-          console.log(`   ${pc.connectionState === 'connected' ? '✅' : '🔄'} Already connected to ${participant.name}: ${pc.connectionState}`);
-        }
-      });
-    }
-    // If I'm a JOINER
-    else {
-      console.log(`👤 I AM A JOINER - connecting to host only`);
-      
-      const host = participants.find(p => p.isHost);
-      if (host && host.id !== user.uid) {
-        if (!peerConnectionsRef.current[host.id]) {
-          console.log(`   🟡 Connecting to host: ${host.name} (${host.id})`);
-          
-          setTimeout(() => {
-            connectToUser(host.id, {
-              name: host.name,
-              photoURL: host.photoURL
-            });
-          }, 1000);
-        }
-      }
-    }
-  });
-  
-  cleanupFunctionsRef.current.push(unsubscribe);
-  
-  return () => {
-    unsubscribe();
-  };
-}, [currentRoom, user, connectToUser]);
-
-  // Update active connections count
-  useEffect(() => {
-    const count = Object.keys(peers).length;
-    setActiveConnections(count);
-    
-    if (count > 0 && connectionStatus !== 'connected') {
-      setConnectionStatus('connected');
-    }
-  }, [peers, connectionStatus]);
-
-  // Auto-cleanup stale connections
-  useEffect(() => {
-    const interval = setInterval(() => {
-      Object.entries(peerConnectionsRef.current).forEach(([userId, pc]) => {
-        if (pc && (pc.connectionState === 'disconnected' || 
-                   pc.connectionState === 'failed' || 
-                   pc.connectionState === 'closed')) {
-          console.log(`🧹 Cleaning up stale connection to ${userId}`);
-          pc.close();
-          delete peerConnectionsRef.current[userId];
-          
-          setPeers(prev => {
-            const newPeers = { ...prev };
-            delete newPeers[userId];
-            return newPeers;
-          });
-        }
-      });
-    }, 10000); // Check every 10 seconds
-    
-    return () => clearInterval(interval);
-  }, []);
-
   const value = {
-    peers,
+    remoteStream,
+    remoteUser,
     connectionStatus,
-    activeConnections,
-    connectToUser,
-    cleanup
+    hangUp,
+    cleanup,
+    // For debugging
+    getPeerConnection: () => peerConnectionRef.current
   };
 
   return (
